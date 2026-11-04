@@ -39,6 +39,7 @@ DATASHEET_FIELDS: tuple[FieldSpec, ...] = (
     FieldSpec("pins", "引脚数", "封装引脚数", ""),
     FieldSpec("security", "安全特性", "安全启动/加密/zone security 等", ""),
     FieldSpec("special", "特色外设", "CLA、DMA、USB、以太网、比较器等值得对比的外设", ""),
+    FieldSpec("other", "其他发现", "清单之外但重要的信息，每条写成 '名称: 值'", ""),
 )
 
 TRM_FIELDS: tuple[FieldSpec, ...] = (
@@ -52,6 +53,7 @@ TRM_FIELDS: tuple[FieldSpec, ...] = (
     FieldSpec("registers", "寄存器", "寄存器帧/访问方式/保护机制", ""),
     FieldSpec("power", "低功耗模式", "IDLE/STANDBY/HALT 等模式与唤醒源", ""),
     FieldSpec("debug", "调试与安全", "JTAG、ERAD、安全 zone、CSM", ""),
+    FieldSpec("other", "其他发现", "清单之外但重要的信息，每条写成 '名称: 值'", ""),
 )
 
 
@@ -67,7 +69,11 @@ GENERIC_FIELDS: tuple[FieldSpec, ...] = (
     FieldSpec("environment", "环境/封装", "温度范围、封装、可靠性等级", ""),
     FieldSpec("registers", "寄存器/地址", "寄存器映射、基地址、访问方式", ""),
     FieldSpec("errata", "限制与勘误", "已知问题、使用限制、注意事项", ""),
+    FieldSpec("other", "其他发现", "清单之外但重要的信息，每条写成 '名称: 值'", ""),
 )
+
+
+MULTI_VALUE_FIELDS = {"other"}
 
 
 def fields_for(kind: str) -> tuple[FieldSpec, ...]:

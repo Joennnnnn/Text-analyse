@@ -39,3 +39,38 @@ def extract_prompt(specs: tuple[FieldSpec, ...], chunk_text: str) -> str:
 def summary_prompt(title: str, block_text: str) -> str:
     return (f"章节：{title}\n\n{block_text}\n\n"
             '输出 JSON：{"bullets":["... [p.12]"]}')
+
+
+BATCH_RULES = """你会收到若干互不相关的文本块，每块以 "## 块 cNNN（第 X-Y 页）" 开头。
+对每个块，只依据该块原文抽取事实，输出一个 JSON（不要解释、不要 markdown 代码围栏）：
+{"facts":[{"cid":"c000","field":"字段id","value":"原文值","unit":"单位或空","page":12,"quote":"该页逐字片段"}]}
+规则：
+- cid 必须等于块的编号；page 必须来自该块内 <<<p.N>>> 标记。
+- quote 必须是该页原文的逐字片段（10~80 字），不要改写。
+- 块里没有的字段不要输出；拿不准的宁可不写。
+- 同一字段在多个块出现时，各写各的，不要合并。"""
+
+SUMMARY_BATCH_RULES = """你会收到若干章节，每个以 "## 小节 s000（第 X 页）TITLE" 开头。
+对每个小节输出 2~6 条要点，每条 ≤40 字，末尾用 [p.N] 标注页码，只写原文明确内容。
+输出一个 JSON（不要解释）：
+{"sections":[{"sid":"s000","bullets":["要点 [p.12]","..."]}]}"""
+
+
+def batch_extract_markdown(specs, chunks: list[dict], batch_id: str) -> str:
+    parts = [f"# 抽取任务批次 {batch_id}", "", BATCH_RULES, "",
+             "## 字段清单", "", field_block(specs), ""]
+    for c in chunks:
+        pages = c["pages"]
+        span = f"{pages[0]}-{pages[-1]}" if len(pages) > 1 else str(pages[0])
+        parts += [f"## 块 {c['cid']}（第 {span} 页）", "", c["text"], ""]
+    parts += ["## 输出", "", '把上面的结果保存为 JSON 文件，内容形如 {"facts":[...]}。', ""]
+    return "\n".join(parts)
+
+
+def batch_summary_markdown(sections: list[dict], batch_id: str) -> str:
+    parts = [f"# 浓缩任务批次 {batch_id}", "", SUMMARY_BATCH_RULES, ""]
+    for s in sections:
+        parts += [f"## 小节 {s['sid']}（第 {s['page']} 页）{s['title']}", "",
+                  s["text"], ""]
+    parts += ["## 输出", "", '保存为 {"sections":[{"sid":"s000","bullets":[...]}]}。', ""]
+    return "\n".join(parts)

@@ -28,14 +28,23 @@ python3 -m venv .venv && .venv/bin/pip install pymupdf
 - `generic`：应用笔记、勘误、用户指南等（文档类型/适用范围/关键参数/时序/寄存器/勘误）
 - 都不合适：`--fields my_fields.json` 自定义字段集（`[{"id","label","hint"}]`）
 
+## 三种推进方式
+
+| 方式 | 谁来做判断 | 是否调 API | 命令 |
+|---|---|---|---|
+| 脚本调模型 | 远程模型 | 是 | `run` / `extract --provider openai…` |
+| agent 驱动 | 当前 agent | 否 | `prepare` → `show`/`submit` → `finish` |
+| 纯手动 | 聊天窗口里的模型 | 否 | `prepare --batch 4` → 复制 `outbox/*.md` → 存 `response/*.json` → `finish` |
+
 ## 工作流（agent 驱动，不调用模型）
 
 ### 0. 建索引
 
 ```bash
-chipdoc index 文档.pdf --work work --kind generic      # kind 可省略
-chipdoc status work/<slug>                              # 看块数/待处理
+chipdoc prepare 文档.pdf --work work --out out --kind generic   # 索引+prompt+任务清单
 ```
+
+（等价于 `index` + 生成 prompt；`prepare` 之后直接读 `work/<slug>/TASKS.md` 即可。）
 
 产物：`work/<slug>/{pages,toc,doc}.json`、`chunks/cNNN.json`。
 
@@ -81,8 +90,7 @@ chipdoc show    work/<slug> s000 --stage summary
 ### 4. 归并 + 渲染
 
 ```bash
-chipdoc merge  work/<slug>
-chipdoc render --work work --out out
+chipdoc finish work/<slug> --out out     # = ingest + verify + merge + render
 ```
 
 产物：

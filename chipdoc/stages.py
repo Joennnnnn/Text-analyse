@@ -22,8 +22,8 @@ from pathlib import Path
 
 from .extract import extract_rules
 from .index import DocIndex, Section, build_chunks, build_index
-from .prompts import (EXTRACT_SYSTEM, PROMPT_VERSION, SUMMARY_SYSTEM,
-                      extract_prompt, summary_prompt)
+from .prompts import (EXTRACT_SYSTEM, PROMPT_VERSION, SUMMARY_SYSTEM, batch_extract_markdown,
+                      batch_summary_markdown, extract_prompt, summary_prompt)
 from .providers import Provider, ProviderError
 from .reduce import Profile, _grounded, merge_facts
 from .schema import fields_for, load_fields
@@ -118,6 +118,60 @@ def stage_index(pdf: str | Path, work_root: str | Path, force: bool = False,
     _write(root / slug / "facts" / "raw" / "_meta.json",
            {"created": time.time(), "prompt_version": PROMPT_VERSION})
     return Workdoc(root / slug)
+
+
+def pending_chunks(wd: Workdoc) -> list[dict]:
+    out = []
+    for f in wd.chunk_files():
+        if (wd.dir / "facts" / "raw" / f"{f.stem}.json").exists():
+            continue
+        data = _read(f, {})
+        out.append({"cid": f.stem, "pages": data.get("pages", []), "text": data.get("text", "")})
+    return out
+
+
+def _blocks(wd: Workdoc) -> list[Section]:
+    blocks = wd.index.section_blocks(1, 2)[:20]
+    if not blocks:
+        blocks = [Section(1, s.sections[0] if s.sections else f"块 {s.cid}", s.pages[0])
+                  for s in wd.index.chunks][:20]
+    return blocks
+
+
+def pending_sections(wd: Workdoc) -> list[dict]:
+    out = []
+    for i, sec in enumerate(_blocks(wd)):
+        sid = f"s{i:03d}"
+        if (wd.dir / "summary" / "partial" / f"{sid}.json").exists():
+            continue
+        text = wd.index.block_text(sec, limit_chars=12000)
+        if len(text) < 120:
+            continue
+        out.append({"sid": sid, "title": sec.title, "page": sec.page, "text": text})
+    return out
+
+
+def stage_outbox(wd: Workdoc, batch_size: int = 1) -> dict:
+    """生成可复制粘贴的任务包（markdown），完全不需要 API。"""
+    ex = pending_chunks(wd)
+    sm = pending_sections(wd)
+    n = max(1, batch_size)
+    ex_batches = [ex[i:i + n] for i in range(0, len(ex), n)]
+    sm_batches = [sm[i:i + n] for i in range(0, len(sm), n)]
+    for i, group in enumerate(ex_batches, 1):
+        _write_text(wd.dir / "outbox" / "extract" / f"b{i:03d}.md",
+                    batch_extract_markdown(wd.fields, group, f"b{i:03d}"))
+    for i, group in enumerate(sm_batches, 1):
+        _write_text(wd.dir / "outbox" / "summary" / f"b{i:03d}.md",
+                    batch_summary_markdown(group, f"b{i:03d}"))
+    return {"extract_batches": len(ex_batches), "summary_batches": len(sm_batches),
+            "chunks": len(ex), "sections": len(sm),
+            "dir": str(wd.dir / "outbox")}
+
+
+def _write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
 
 
 # --------------------------------------------------------------------------
@@ -231,7 +285,6 @@ def stage_ingest(wd: Workdoc) -> dict:
         for key in sorted(keys):
             resp = wd.dir / "response" / stage / f"{key}.json"
             if not resp.exists():
-                stats["missing"] += 1
                 continue
             try:
                 payload = json.loads(resp.read_text(encoding="utf-8"))
@@ -243,8 +296,28 @@ def stage_ingest(wd: Workdoc) -> dict:
                     continue
             if stage == "extract":
                 valid = {s.id for s in wd.fields}
-                facts = [_coerce(d, valid) for d in payload.get("facts", [])]
-                _save_result(wd.dir, key, [f for f in facts if f])
+                grouped: dict[str, list[Fact]] = {}
+                for d in payload.get("facts", []):
+                    cid = str(d.get("cid", key)) if isinstance(d, dict) else key
+                    f = _coerce(d, valid)
+                    if f:
+                        grouped.setdefault(cid, []).append(f)
+                for cid, fs in grouped.items():
+                    _save_result(wd.dir, cid, fs)
+                if not grouped:
+                    _save_result(wd.dir, key, [])
+            elif "sections" in payload:
+                for item in payload.get("sections", []):
+                    sid = str(item.get("sid", ""))
+                    if not sid:
+                        continue
+                    sec = _section_by_id(wd, sid)
+                    _write(wd.dir / "summary" / "partial" / f"{sid}.json", {
+                        "sid": sid,
+                        "title": sec.title if sec else sid,
+                        "page": sec.page if sec else 1,
+                        "bullets": [str(b).strip() for b in item.get("bullets", []) if str(b).strip()],
+                    })
             else:
                 meta = _read(wd.dir / "prompt" / stage / f"{key}.json", {})
                 if not meta:
@@ -255,6 +328,7 @@ def stage_ingest(wd: Workdoc) -> dict:
                 payload.setdefault("page", meta.get("page", 1))
                 _write(wd.dir / "summary" / "partial" / f"{key}.json", payload)
             stats["ingested"] += 1
+    stats["missing"] = len(pending_chunks(wd)) + len(pending_sections(wd))
     return stats
 
 

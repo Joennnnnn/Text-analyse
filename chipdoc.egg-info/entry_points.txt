@@ -1,0 +1,2 @@
+[console_scripts]
+chipdoc = chipdoc.cli:main

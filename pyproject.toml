@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chipdoc"
+version = "0.2.0"
+description = "芯片/电子类 PDF 分析流水线：页码溯源、横向对比、增量 diff"
+requires-python = ">=3.11"
+dependencies = ["pymupdf>=2.0"]
+
+[project.scripts]
+chipdoc = "chipdoc.cli:main"
+
+[tool.setuptools]
+packages = ["chipdoc"]

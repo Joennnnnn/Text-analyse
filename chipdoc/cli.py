@@ -18,21 +18,24 @@ import time
 from pathlib import Path
 
 from .index import build_index
-from .providers import ProviderError, load_config, make_provider, resolve_config
+from .providers import ExternalProvider, ProviderConfig, ProviderError, load_config, make_provider, resolve_config
 from .render import (build_matrix, diff_snapshots, make_snapshot, write_diff, write_doc,
                      write_matrix)
 from .prompts import EXTRACT_SYSTEM, SUMMARY_SYSTEM, extract_prompt, summary_prompt
-from .stages import (Workdoc, _read, stage_extract, stage_index, stage_ingest, stage_merge,
-                     stage_summarize, stage_verify)
+from .stages import (Workdoc, _read, pending_chunks, pending_sections, stage_extract,
+                     stage_index, stage_ingest, stage_merge, stage_outbox, stage_summarize,
+                     stage_verify)
 
 
 def _provider_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--config", default=None, help="JSON/TOML 配置：default + stages.<阶段>")
-    p.add_argument("--provider", choices=["openai", "anthropic", "command", "external"], default=None)
-    p.add_argument("--model", default=None)
-    p.add_argument("--base-url", default=None)
-    p.add_argument("--api-key-env", default=None)
-    p.add_argument("--json-mode", action="store_true")
+    p.add_argument("--config", default=None, help="多模型配置 JSON/TOML：default + stages.<阶段>")
+    p.add_argument("--provider", choices=["openai", "anthropic", "command", "external"],
+                   default=None,
+                   help="openai=任意兼容端点；anthropic=Claude；command=任意命令行；external=只出任务包")
+    p.add_argument("--model", default=None, help="模型名，如 deepseek-chat、qwen-max")
+    p.add_argument("--base-url", default=None, help="OpenAI 兼容端点，如 http://localhost:11434/v1")
+    p.add_argument("--api-key-env", default=None, help="从该环境变量读取 API key")
+    p.add_argument("--json-mode", action="store_true", help="请求 JSON 模式（部分端点不支持）")
 
 
 def _cfg(args, stage: str):
@@ -77,9 +80,9 @@ def cmd_extract(args) -> int:
 def cmd_ingest(args) -> int:
     for wd in _wd(args.workdirs):
         stats = stage_ingest(wd)
-        print(f"+ {wd.slug}: 收编 {stats['ingested']}，缺回答 {stats['missing']}，解析失败 {stats['failed']}")
+        print(f"+ {wd.slug}: 收编 {stats['ingested']}，未完成 {stats['missing']} 项，解析失败 {stats['failed']}")
         if stats["missing"]:
-            print(f"  → 还有 {stats['missing']} 个 prompt 没有对应 response/…/<cid>.json")
+            print(f"  → 还有 {stats['missing']} 个块/小节没有答案，可运行 chipdoc outbox 重新生成任务包")
 
 
 def cmd_verify(args) -> int:
@@ -193,6 +196,84 @@ def _summary_pending(wd: Workdoc) -> list[tuple[str, str, int]]:
         if not (wd.dir / "summary" / "partial" / f"{sid}.json").exists():
             out.append((sid, sec.title, sec.page))
     return out
+
+
+def _write_tasks(wd, n_extract: int, n_summary: int, out: str = "out",
+                 batches: dict | None = None) -> Path:
+    batches = batches or {}
+    lines = [f"# 待处理任务：{wd.doc['title']}", "",
+             f"- 工作目录：`{wd.dir}`",
+             f"- {wd.index.page_count} 页 · {len(wd.chunk_files())} 块 · 类型 `{wd.index.kind}`",
+             f"- 任务包目录：`{batches.get('dir', wd.dir / 'outbox')}`", ""]
+    if n_extract:
+        lines += ["## 1. 抽取（只依据块内原文，必须给 page + 逐字 quote）", "",
+                  f"共 {batches.get('extract_batches', 0)} 个任务包，每个包 {n_extract} 块待处理：", "",
+                  "1. 打开 `outbox/extract/b001.md`，整份复制给任意模型/聊天窗口",
+                  "2. 把模型返回的 JSON 原样保存为 `response/extract/b001.json`",
+                  "3. 本地收编：`chipdoc ingest <workdir>`", ""]
+    if n_summary:
+        lines += ["## 2. 分节浓缩（要点 ≤40 字，末尾 [p.N]）", "",
+                  f"共 {batches.get('summary_batches', 0)} 个任务包：", "",
+                  "1. 打开 `outbox/summary/b001.md`，整份复制给模型",
+                  "2. 返回的 JSON 存为 `response/summary/b001.json`",
+                  "3. `chipdoc ingest <workdir>`", ""]
+    if not n_extract and not n_summary:
+        lines += ["所有块与小节都已处理，直接收尾即可。", ""]
+    lines += ["## 3. 收尾（本地执行，不调用模型）", "",
+              "```bash",
+              f"chipdoc finish {wd.dir} --out {out}",
+              "```", "",
+              "`finish` 会做：收编 response → 页码校验（丢弃编造引文）→ 归并 → 生成 "
+              "`summary.md` / `matrix.md` / `diff.md`。", ""]
+    path = wd.dir / "TASKS.md"
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+def cmd_outbox(args) -> int:
+    for wd in _wd(args.workdirs):
+        info = stage_outbox(wd, batch_size=args.batch)
+        print(f"+ {wd.slug}: 抽取 {info['chunks']} 块 → {info['extract_batches']} 个包，"
+              f"浓缩 {info['sections']} 节 → {info['summary_batches']} 个包")
+        print(f"  目录：{info['dir']}")
+
+
+def cmd_prepare(args) -> int:
+    """本地准备：索引 + 生成 prompt + 写任务清单。全程不调用模型。"""
+    external = ExternalProvider(ProviderConfig(kind="external"))
+    for pdf in args.pdfs:
+        wd = stage_index(pdf, args.work, force=args.refresh,
+                         kind=args.kind, fields_path=args.fields)
+        print(f"+ {wd.slug}: {wd.index.page_count} 页 / {len(wd.chunk_files())} 块 / 类型 {wd.index.kind}")
+        if args.rules:
+            r = stage_extract(wd, external, engine="rules")
+            print(f"  rules 基线: {r.get('rules_facts', 0)} 条")
+        ex = stage_extract(wd, external, engine="llm")
+        sm = stage_summarize(wd, external, jobs=1)
+        batches = stage_outbox(wd, batch_size=args.batch)
+        tasks = _write_tasks(wd, ex["pending"], sm["pending"], args.out, batches)
+        print(f"  待处理：抽取 {ex['pending']} 块（{batches['extract_batches']} 个包），"
+              f"浓缩 {sm['pending']} 节（{batches['summary_batches']} 个包）")
+        print(f"  任务清单：{tasks}")
+        print(f"  完成后本地收尾：chipdoc finish {wd.dir} --out {args.out}")
+
+
+def cmd_finish(args) -> int:
+    """本地收尾：收编 → 校验 → 归并 → 渲染。全程不调用模型。"""
+    roots: list[Path] = []
+    for wd in _wd(args.workdirs):
+        ing = stage_ingest(wd)
+        v = stage_verify(wd)
+        stage_merge(wd)
+        flag = f"，仍有 {ing['missing']} 个 response 缺失" if ing["missing"] else ""
+        print(f"+ {wd.slug}: 收编 {ing['ingested']}，保留 {v['kept']}（逐字 {v['verified']}），"
+              f"丢弃 {v['dropped']}{flag}")
+        if wd.dir.parent not in roots:
+            roots.append(wd.dir.parent)
+    code = 0
+    for root in roots:
+        code = cmd_render(argparse.Namespace(work=str(root), out=args.out)) or code
+    return code
 
 
 def cmd_status(args) -> int:
@@ -341,99 +422,128 @@ def cmd_inspect(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="chipdoc", description="芯片 PDF 分析流水线（阶段化、模型无关）")
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    ap = argparse.ArgumentParser(
+        prog="chipdoc",
+        description="芯片/电子类 PDF 分析流水线：索引 → 抽取 → 校验 → 浓缩 → 归并 → 渲染",
+        epilog="示例：chipdoc prepare 手册.pdf --work work --batch 4")
+    sub = ap.add_subparsers(dest="cmd", required=True, metavar="命令")
 
-    p = sub.add_parser("index", help="PDF → 页码索引/切块（不调用模型）")
-    p.add_argument("pdfs", nargs="+")
-    p.add_argument("--work", default="work")
-    p.add_argument("--refresh", action="store_true")
+    p = sub.add_parser("doctor", help="体检：环境能力 + PDF 是否可分析")
+    p.add_argument("pdf", nargs="?", default=None, help="可选：体检指定 PDF")
+    p.set_defaults(func=cmd_doctor)
+
+    p = sub.add_parser("inspect", help="预览页数/目录/切块/无文本层页")
+    p.add_argument("pdf", help="PDF 路径")
+    p.add_argument("--kind", default=None, help="强制指定文档类型")
+    p.set_defaults(func=cmd_inspect)
+
+    p = sub.add_parser("index", help="① 建索引与切块（不调用模型）")
+    p.add_argument("pdfs", nargs="+", help="一个或多个 PDF")
+    p.add_argument("--work", default="work", help="工作目录根，默认 work")
     p.add_argument("--kind", default=None, help="datasheet / trm / generic（默认自动判断）")
     p.add_argument("--fields", default=None, help="自定义字段集 JSON")
+    p.add_argument("--refresh", action="store_true", help="忽略已有索引，重新建立")
     p.set_defaults(func=cmd_index)
 
-    p = sub.add_parser("extract", help="切块 → facts（可换模型 / 可外部交接）")
-    p.add_argument("workdirs", nargs="+")
-    p.add_argument("--engine", choices=["llm", "rules", "both"], default="llm")
-    p.add_argument("--jobs", type=int, default=6)
-    p.add_argument("--force", action="store_true")
-    p.add_argument("--chunks", default=None, help="只跑指定块，如 c001,c002")
+    p = sub.add_parser("prepare", help="①+ 本地准备：索引 + 任务包 + 清单（不调用模型）")
+    p.add_argument("pdfs", nargs="+", help="一个或多个 PDF")
+    p.add_argument("--work", default="work", help="工作目录根，默认 work")
+    p.add_argument("--out", default="out", help="输出目录，默认 out")
+    p.add_argument("--kind", default=None, help="datasheet / trm / generic")
+    p.add_argument("--fields", default=None, help="自定义字段集 JSON")
+    p.add_argument("--refresh", action="store_true", help="忽略缓存，重新建立")
+    p.add_argument("--rules", action="store_true", help="同时跑一遍规则引擎基线")
+    p.add_argument("--batch", type=int, default=4, help="每个任务包放几个块，默认 4")
+    p.set_defaults(func=cmd_prepare)
+
+    p = sub.add_parser("outbox", help="重新生成可复制粘贴的任务包（不调用模型）")
+    p.add_argument("workdirs", nargs="+", help="工作目录")
+    p.add_argument("--batch", type=int, default=4, help="每个任务包放几个块，默认 4")
+    p.set_defaults(func=cmd_outbox)
+
+    p = sub.add_parser("extract", help="② 抽取：块 → facts（可调模型 / 可只出任务包）")
+    p.add_argument("workdirs", nargs="+", help="工作目录，如 work/tms320f28054f")
+    p.add_argument("--engine", choices=["llm", "rules", "both"], default="llm",
+                   help="llm=调模型；rules=规则引擎；both=都跑后合并")
+    p.add_argument("--jobs", type=int, default=6, help="并发数，默认 6")
+    p.add_argument("--force", action="store_true", help="忽略已有结果，强制重跑")
+    p.add_argument("--chunks", default=None, help="只跑指定块，逗号分隔，如 c010,c011")
     _provider_args(p)
     p.set_defaults(func=cmd_extract)
 
-    p = sub.add_parser("ingest", help="把 response/ 的外部结果收编")
-    p.add_argument("workdirs", nargs="+")
+    p = sub.add_parser("submit", help="②' 把 agent/手动的 JSON 答案写进 response/")
+    p.add_argument("workdir", help="工作目录")
+    p.add_argument("key", help="块 id（c000）或小节 id（s000），也可是任务包名 b001")
+    p.add_argument("--stage", choices=["extract", "summary"], default="extract", help="提交哪一阶段")
+    p.add_argument("--file", default=None, help="JSON 文件；省略则从 stdin 读")
+    p.set_defaults(func=cmd_submit)
+
+    p = sub.add_parser("ingest", help="②' 收编 response/ 里的答案")
+    p.add_argument("workdirs", nargs="+", help="工作目录")
     p.set_defaults(func=cmd_ingest)
 
-    p = sub.add_parser("verify", help="页码校验（不调用模型）")
-    p.add_argument("workdirs", nargs="+")
+    p = sub.add_parser("verify", help="③ 页码校验：引文是否真在该页（不调用模型）")
+    p.add_argument("workdirs", nargs="+", help="工作目录")
     p.set_defaults(func=cmd_verify)
 
-    p = sub.add_parser("summarize", help="分节浓缩（可单独换模型）")
-    p.add_argument("workdirs", nargs="+")
-    p.add_argument("--jobs", type=int, default=4)
-    p.add_argument("--force", action="store_true")
+    p = sub.add_parser("summarize", help="④ 分节浓缩（可单独换模型）")
+    p.add_argument("workdirs", nargs="+", help="工作目录")
+    p.add_argument("--jobs", type=int, default=4, help="并发数，默认 4")
+    p.add_argument("--force", action="store_true", help="忽略已有要点，重新生成")
     _provider_args(p)
     p.set_defaults(func=cmd_summarize)
 
-    p = sub.add_parser("merge", help="归并成 profile.json")
-    p.add_argument("workdirs", nargs="+")
+    p = sub.add_parser("merge", help="⑤ 归并成 profile.json（不调用模型）")
+    p.add_argument("workdirs", nargs="+", help="工作目录")
     p.set_defaults(func=cmd_merge)
 
-    p = sub.add_parser("render", help="生成对比矩阵与增量 diff")
-    p.add_argument("--work", default="work")
-    p.add_argument("--out", default="out")
+    p = sub.add_parser("render", help="⑥ 生成 summary/matrix/diff（不调用模型）")
+    p.add_argument("--work", default="work", help="工作目录根，默认 work")
+    p.add_argument("--out", default="out", help="输出目录，默认 out")
     p.set_defaults(func=cmd_render)
+
+    p = sub.add_parser("finish", help="⑥+ 本地收尾：ingest+verify+merge+render（不调用模型）")
+    p.add_argument("workdirs", nargs="+", help="工作目录")
+    p.add_argument("--work", default="work", help="（保留参数，收尾时按工作目录自动定位）")
+    p.add_argument("--out", default="out", help="输出目录，默认 out")
+    p.set_defaults(func=cmd_finish)
 
     for name in ("run", "analyze"):
         p = sub.add_parser(name, help="一条龙：index → extract → verify → merge → render")
-        p.add_argument("pdfs", nargs="+")
-        p.add_argument("--work", default="work")
-        p.add_argument("--out", default="out")
-        p.add_argument("--engine", choices=["llm", "rules", "both"], default="llm")
-        p.add_argument("--jobs", type=int, default=6)
-        p.add_argument("--refresh", action="store_true")
+        p.add_argument("pdfs", nargs="+", help="一个或多个 PDF")
+        p.add_argument("--work", default="work", help="工作目录根，默认 work")
+        p.add_argument("--out", default="out", help="输出目录，默认 out")
+        p.add_argument("--engine", choices=["llm", "rules", "both"], default="llm",
+                       help="llm=调模型；rules=规则引擎；both=两者合并")
+        p.add_argument("--jobs", type=int, default=6, help="并发数，默认 6")
+        p.add_argument("--refresh", action="store_true", help="忽略缓存，全部重跑")
         p.add_argument("--kind", default=None, help="datasheet / trm / generic")
         p.add_argument("--fields", default=None, help="自定义字段集 JSON")
         _provider_args(p)
         p.set_defaults(func=cmd_run)
 
-    p = sub.add_parser("compare", help="只重建矩阵与 diff")
-    p.add_argument("--work", default="work")
-    p.add_argument("--out", default="out")
+    p = sub.add_parser("compare", help="只重建矩阵与 diff（不调用模型）")
+    p.add_argument("--work", default="work", help="工作目录根，默认 work")
+    p.add_argument("--out", default="out", help="输出目录，默认 out")
     p.set_defaults(func=cmd_render)
 
-    p = sub.add_parser("submit", help="把 agent 生成的 JSON 答案写进 response/")
-    p.add_argument("workdir")
-    p.add_argument("key")
-    p.add_argument("--stage", choices=["extract", "summary"], default="extract")
-    p.add_argument("--file", default=None, help="JSON 文件；省略则从 stdin 读")
-    p.set_defaults(func=cmd_submit)
-
-    p = sub.add_parser("status", help="查看各阶段进度")
-    p.add_argument("workdirs", nargs="+")
+    p = sub.add_parser("status", help="查看各阶段进度（不调用模型）")
+    p.add_argument("workdirs", nargs="+", help="工作目录")
     p.set_defaults(func=cmd_status)
 
     p = sub.add_parser("pending", help="列出还没处理的块/小节")
-    p.add_argument("workdirs", nargs="+")
-    p.add_argument("--stage", choices=["extract", "summary"], default="extract")
-    p.add_argument("--limit", type=int, default=20)
+    p.add_argument("workdirs", nargs="+", help="工作目录")
+    p.add_argument("--stage", choices=["extract", "summary"], default="extract",
+                   help="extract=抽取块；summary=分节浓缩")
+    p.add_argument("--limit", type=int, default=20, help="最多列出几条，默认 20")
     p.set_defaults(func=cmd_pending)
 
     p = sub.add_parser("show", help="打印某块/某节的完整请求（system+user），给 agent 用")
-    p.add_argument("workdir", )
+    p.add_argument("workdir", help="工作目录")
     p.add_argument("key", help="块 id（c000）或小节 id（s000）")
-    p.add_argument("--stage", choices=["extract", "summary"], default="extract")
+    p.add_argument("--stage", choices=["extract", "summary"], default="extract",
+                   help="看哪一阶段的请求")
     p.set_defaults(func=cmd_show)
-
-    p = sub.add_parser("doctor", help="体检：环境可用能力 + 这份 PDF 能不能直接跑")
-    p.add_argument("pdf", nargs="?", default=None)
-    p.set_defaults(func=cmd_doctor)
-
-    p = sub.add_parser("inspect", help="查看页数/目录/切块，不调用模型")
-    p.add_argument("pdf")
-    p.add_argument("--kind", default=None)
-    p.set_defaults(func=cmd_inspect)
 
     args = ap.parse_args(argv)
     try:

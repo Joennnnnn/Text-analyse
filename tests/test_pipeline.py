@@ -93,6 +93,15 @@ class TestMerge(unittest.TestCase):
         self.assertEqual(merge_facts(facts, "datasheet")["core"]["page"], 1)
 
 
+class TestCatchAll(unittest.TestCase):
+    def test_other_collects_multiple(self):
+        facts = [Fact("other", "温度传感器: 有", 3, "x", confidence="verified"),
+                 Fact("other", "双采样保持: 有", 5, "y", confidence="verified")]
+        merged = merge_facts(facts, "datasheet")
+        self.assertEqual(merged["other"]["value"], "2 条")
+        self.assertEqual(len(merged["other"]["alternates"]), 2)
+
+
 class TestDiff(unittest.TestCase):
     def test_changed_value(self):
         old = {"docs": {"a": {"title": "A", "fields": {"max_freq": {"value": "60 MHz", "page": 1}}}}}
@@ -228,6 +237,39 @@ class TestExternalHandoff(unittest.TestCase):
             self.assertEqual(main(["render", "--work", str(work), "--out", str(out)]), 0)
             self.assertTrue((out / "matrix.md").exists())
             self.assertTrue((out / "diff.md").exists())
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestPrepareFinish(unittest.TestCase):
+    """本地准备（不调模型）→ agent 答题 → 本地收尾（不调模型）。"""
+
+    def test_local_prepare_then_agent_then_finish(self):
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            pdf = tmp / "acme_x100.pdf"
+            make_pdf(pdf)
+            work, out = tmp / "work", tmp / "out"
+            self.assertEqual(main(["prepare", str(pdf), "--work", str(work), "--out", str(out)]), 0)
+
+            wd = work / "acme_x100"
+            self.assertTrue((wd / "TASKS.md").exists())
+            cid = sorted((wd / "prompt" / "extract").glob("*.json"))[0].stem
+
+            ans = tmp / "ans.json"
+            ans.write_text(json.dumps({"facts": [
+                {"field": "max_freq", "value": "60 MHz", "page": 1, "quote": "SYSCLK up to 60 MHz"},
+                {"field": "flash", "value": "1 MB", "page": 2, "quote": "flash is 1 MB"},
+            ]}), encoding="utf-8")
+            self.assertEqual(main(["submit", str(wd), cid, "--file", str(ans)]), 0)
+            self.assertEqual(main(["finish", str(wd), "--out", str(out)]), 0)
+
+            profile = json.loads((wd / "profile.json").read_text())
+            self.assertEqual(profile["fields"]["max_freq"]["value"], "60 MHz")
+            self.assertNotIn("flash", profile["fields"])      # 编造的被丢弃
+            summary = (out / "docs" / "acme_x100" / "summary.md").read_text(encoding="utf-8")
+            self.assertIn("[p.1]", summary)
+            self.assertTrue((out / "matrix.md").exists())
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

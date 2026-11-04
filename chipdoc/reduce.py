@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass, field
 
 from .index import DocIndex, Section
-from .schema import fields_for
+from .schema import MULTI_VALUE_FIELDS, fields_for
 from .verify import Fact, norm
 
 CITE_RE = re.compile(r"\[p\.(\d+)\]")
@@ -46,6 +46,19 @@ def merge_facts(facts: list[Fact], kind: str) -> dict[str, dict]:
     for fid in ids:
         group = by.get(fid)
         if not group:
+            continue
+        if fid in MULTI_VALUE_FIELDS:
+            seen_v: set[str] = set()
+            items = []
+            for f in sorted(group, key=lambda x: x.page):
+                n = norm(f.value)
+                if n and n not in seen_v:
+                    seen_v.add(n)
+                    items.append({"value": f.value, "page": f.page,
+                                  "confidence": f.confidence})
+            out[fid] = {"value": f"{len(items)} 条", "unit": "", "page": items[0]["page"],
+                        "confidence": "page_only", "quote": "", "source": "llm",
+                        "alternates": items[:20]}
             continue
         group.sort(key=lambda f: (f.confidence != "verified", f.source != "llm", f.page))
         best = group[0]

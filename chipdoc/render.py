@@ -22,7 +22,7 @@ def field_table(profile: Profile, out_dir: Path) -> str:
     rows = ["| 字段 | 取值 | 出处 | 置信 |", "|---|---|---|---|"]
     for spec in fields_for(profile.kind):
         f = profile.fields.get(spec.id)
-        if not f:
+        if not f or spec.id == "other":
             continue
         link = f"[p.{f['page']}]({_rel_link(profile.path, out_dir, f['page'])})"
         conf = "✔ 逐字" if f["confidence"] == "verified" else "△ 仅页级"
@@ -50,6 +50,14 @@ def summary_markdown(profile: Profile, out_dir: Path) -> str:
     lines.append("")
     lines.append(field_table(profile, out_dir))
     lines.append("")
+    other = profile.fields.get("other")
+    if other and other.get("alternates"):
+        lines.append("### 其他发现（不在字段清单内的内容）")
+        lines.append("")
+        for item in other["alternates"]:
+            lines.append(f"- {item['value']} [p.{item['page']}]")
+        lines.append("")
+
     lines.append("## 二、分节浓缩（每条带页码）")
     lines.append("")
     for sec in profile.sections:

@@ -1,76 +1,397 @@
-# chipdoc — 芯片 PDF 分析流水线（datasheet / TRM）
+# chipdoc — 芯片 / 电子类 PDF 分析流水线
 
-把几十万字符的芯片手册，压成**带页码可溯源**的结论、**可横向对比**的表格，并在新增型号时只跑新文档、输出**增量 diff**。
+把几十万字符的技术文档（datasheet、TRM、应用笔记、勘误、用户指南）压成：
 
-拆成 7 个阶段，**每阶段读文件、写文件**，所以：
+- **带页码溯源的浓缩**（每条结论都能跳回原文该页）
+- **多型号横向对比表**（CSV/Markdown）
+- **增量 diff**（新增型号、字段变化）
 
-- 可以只跑其中一段（比如只重跑某几块的抽取）
-- 可以给每一段配不同的模型/工具（抽取用便宜模型、浓缩用强模型）
-- 可以完全不调用模型：把 prompt 写成文件，交给任意工具或人，再把结果写回来
-- 断点续跑、局部返工都不会重花前面的钱
+特点：阶段化、文件化、**不绑定模型**。全程可以零 API 调用——本地生成任务包，你手动贴给任意模型，再把 JSON 放回来。
 
-## 阶段与产物
+## 目录
 
-| 阶段 | 命令 | 输入 | 输出 | 用模型？ |
-|---|---|---|---|---|
-| ① 索引 | `chipdoc index` | PDF | `work/<slug>/{doc,pages,toc}.json`、`chunks/cNNN.json` | 否 |
-| ② 抽取 | `chipdoc extract` | chunks | `facts/raw/cNNN.json`（每块一个文件） | 可换模型 / 可外部 |
-| ②' 收编 | `chipdoc ingest` | `response/` | `facts/raw/*.json` | 否 |
-| ③ 校验 | `chipdoc verify` | facts/raw | `facts/verified.json`（保留 + 丢弃 + 原因） | 否（纯字符串比对） |
-| ④ 浓缩 | `chipdoc summarize` | 章节 | `summary/sections.json` | 可换另一个模型 / 可外部 |
-| ⑤ 归并 | `chipdoc merge` | verified + sections | `profile.json` | 否 |
-| ⑥ 渲染 | `chipdoc render` | 所有 profile | `out/docs/*/summary.md`、`out/matrix.{md,csv}`、`out/diff.md` | 否 |
+1. [它能做什么](#它能做什么)
+2. [安装与快速开始](#安装与快速开始)
+3. [三种工作方式](#三种工作方式)
+4. [命令参考](#命令参考)
+5. [参数速查表](#参数速查表)
+6. [环境变量与配置文件](#环境变量与配置文件)
+7. [目录与产物](#目录与产物)
+8. [页码溯源原理](#页码溯源原理)
+9. [成本与性能](#成本与性能)
+10. [已知限制](#已知限制)
+11. [测试](#测试)
 
-一条龙：`chipdoc run`（= `analyze`），内部就是按顺序调用上面这些阶段。
+## 它能做什么
 
-辅助命令（给 agent / 人工用）：
-
-| 命令 | 用途 |
+| 能力 | 说明 |
 |---|---|
-| `chipdoc status <work>` | 看各阶段进度：多少块完成、校验保留/丢弃多少、摘要几节 |
-| `chipdoc pending <work> [--stage summary]` | 列出还没处理的块/小节 |
-| `chipdoc show <work> c000 [--stage summary]` | 打印该块完整请求（system+user），agent 读完直接作答 |
-| `chipdoc submit <work> c000 --file ans.json` | 把答案写进 `response/`，随后 `ingest` 收编 |
-| `chipdoc doctor [pdf]` | 体检：OCR 工具是否可用、PDF 有没有文本层/目录/加密，能不能直接跑 |
+| 文档类型 | datasheet / TRM / 应用笔记 / 勘误 / 通用技术文档；也可自定义字段集 |
+| 输入 | 任意有文本层的 PDF（1 份或多份） |
+| 输出 | `summary.md`（带 `[p.N]`）、`matrix.md/csv`、`diff.md` |
+| 判断层 | 任意 OpenAI 兼容模型、Claude、本地命令行，或 **agent / 人手动完成** |
+| 溯源 | 每条结论强制 `page` + 逐字 `quote`，脚本回查原文，查不到即丢弃 |
+| 增量 | 按文件指纹复用，新增文档只跑新增部分 |
 
-## 支持哪些文档
-
-| 类型 | 字段集 | 说明 |
-|---|---|---|
-| datasheet | `DATASHEET_FIELDS` | 主频/存储/外设/电气/温度/封装 |
-| TRM | `TRM_FIELDS` | 存储器映射/时钟/中断/寄存器/低功耗/调试 |
-| 应用笔记、勘误、用户指南等 | `GENERIC_FIELDS` | 文档类型/适用范围/关键参数/接口/时序/寄存器/勘误 |
-| 其它 | `--fields my.json` | 自定义 `[{id,label,hint}]`，任意文档都能套 |
-
-默认按标题、元数据和目录自动判断；判断不准时用 `--kind generic` 或 `--fields` 覆盖。**任何有文本层的 PDF 都能跑**；扫描件需要先 OCR（`chipdoc inspect` 会列出无文本层的页）。
-
-## 两种用法
-
-**A. 脚本调模型**：`run` 或分阶段 `extract/summarize --provider ...`，适合批处理。
-
-**B. agent 自己当模型（不调任何 API）**：skill 负责中间层，脚本只做切块和校验。
+## 安装与快速开始
 
 ```bash
-chipdoc index 文档.pdf --work work --kind generic
-chipdoc pending work/<slug> --limit 5      # 看还有哪些块
-chipdoc show    work/<slug> c000           # 拿到该块的 system+user
-# agent 读原文、产出 {"facts":[...]} 并 submit
-chipdoc submit work/<slug> c000 --file facts.json
-chipdoc ingest work/<slug> && chipdoc verify work/<slug>
-# 摘要同理：pending --stage summary → show → submit --stage summary → ingest
-chipdoc merge work/<slug> && chipdoc render --work work --out out
+python3 -m venv .venv
+.venv/bin/pip install -e .             # 安装 chipdoc 命令 + 唯一依赖 PyMuPDF
+
+# 有模型 key 时，一条龙
+export DEEPSEEK_API_KEY=sk-...
+chipdoc run 手册.pdf --out out
+
+# 没有 key / 不想联网：本地准备 → 手动贴模型 → 本地收尾
+chipdoc prepare 手册.pdf --work work --batch 4
+# 复制 work/<slug>/outbox/extract/b001.md 给任意模型，JSON 存到 response/extract/b001.json
+chipdoc finish work/<slug> --out out
 ```
 
-完整协议见 [`skills/chip-doc-pipeline/SKILL.md`](skills/chip-doc-pipeline/SKILL.md)。
+> 下文所有 `chipdoc` 指 `.venv/bin/chipdoc`（激活 venv 后直接可用）。不想安装时，把 `chipdoc` 换成 `.venv/bin/python -m chipdoc`，行为完全一致。
 
-## 支持的后端（任选，可混用）
+## 三种工作方式
 
-| provider | 说明 | 配置 |
+| 方式 | 谁做判断 | 联网 | 典型命令 |
+|---|---|---|---|
+| A. 脚本调模型 | 远程/本地模型 | 是 | `run` / `extract --provider openai` |
+| B. agent 驱动 | 当前 agent | 否 | `prepare` → `show` → `submit` → `finish` |
+| C. 纯手动 | 聊天窗口里的模型 | 否 | `prepare --batch` → 复制 `outbox/*.md` → 存 `response/*.json` → `finish` |
+
+## 命令参考
+
+通用约定：
+
+- `<workdir>`：某份文档的工作目录，形如 `work/tms320f28054f`，由 `index` / `prepare` 生成
+- `<slug>`：PDF 文件名转成的小写短名（`TMS320F28054F.pdf` → `tms320f28054f`）
+- 🔒 标记的命令**完全不联网**；🌐 表示可能调用模型
+- 每个命令都支持 `-h/--help`
+- 退出码：`0` 成功，`1` 运行错误（provider/文件），`2` 参数或输入错误
+
+### 1. 体检与预览
+
+#### `chipdoc doctor [pdf]` 🔒
+
+检查环境（PyMuPDF、OCR 工具）和某份 PDF 能否直接分析。**任何操作前建议先跑一次。**
+
+| 参数 | 说明 |
+|---|---|
+| `pdf` | 可选。不传只报环境 |
+
+```bash
+chipdoc doctor                  # 只看环境
+chipdoc doctor 手册.pdf          # 看这份文档的文本层/目录/加密/图片
+```
+
+输出包含：页数、文本层覆盖页数、需 OCR 的页、书签数、估算 token、结论（可直接分析 / 部分可分析 / 必须先 OCR）。
+
+#### `chipdoc inspect <pdf>` 🔒
+
+预览文档结构：页数、目录前 10 条、无文本层页、切块数量与平均大小。
+
+| 参数 | 说明 |
+|---|---|
+| `pdf` | 必填 |
+| `--kind` | 强制文档类型：`datasheet` / `trm` / `generic` |
+
+```bash
+chipdoc inspect 手册.pdf --kind trm
+```
+
+### 2. 准备（全部 🔒）
+
+#### `chipdoc index <pdf...>` 🔒
+
+建立索引：逐页抽文本（清页眉页脚噪声）、读 PDF 书签、按 ≤3 页且 ≤4500 字符切块。
+
+| 参数 | 默认 | 说明 |
 |---|---|---|
-| `openai` | 任意 OpenAI 兼容端点：DeepSeek、通义千问、Kimi、vLLM、Ollama、LM Studio、one-api… | `base_url` + `model` + `api_key_env` |
-| `anthropic` | Claude Messages API | `model` + `ANTHROPIC_API_KEY` |
-| `command` | 任意本地命令行：prompt 走 stdin，答案读 stdout | `command: ["ollama","run","qwen2.5"]` |
-| `external` | 不调用任何模型：写 prompt 文件，等外部写回 | 无 |
+| `pdfs` | — | 一个或多个 PDF |
+| `--work` | `work` | 工作目录根 |
+| `--kind` | 自动 | `datasheet` / `trm` / `generic` |
+| `--fields` | 无 | 自定义字段集 JSON（`[{"id","label","hint"}]`） |
+| `--refresh` | 关 | 忽略已有索引，强制重建 |
+
+```bash
+chipdoc index 手册.pdf 另一份.pdf --work work --kind datasheet
+```
+
+产物：`work/<slug>/{doc,pages,toc}.json`、`work/<slug>/chunks/cNNN.json`。
+
+#### `chipdoc prepare <pdf...>` 🔒
+
+`index` 的超集：索引 + 生成任务包（outbox）+ 写 `TASKS.md`。**手动/agent 流程从这里开始。**
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `pdfs` | — | 一个或多个 PDF |
+| `--work` | `work` | 工作目录根 |
+| `--out` | `out` | 输出目录（写进 TASKS.md 的收尾命令里） |
+| `--kind` | 自动 | `datasheet` / `trm` / `generic` |
+| `--fields` | 无 | 自定义字段集 |
+| `--batch` | `4` | 每个任务包包含几个块（3–5 适合手动粘贴） |
+| `--rules` | 关 | 同时跑规则引擎，先得到一份粗基线 |
+| `--refresh` | 关 | 忽略缓存重建 |
+
+```bash
+chipdoc prepare 手册.pdf --work work --out out --batch 4 --rules
+```
+
+产物：`work/<slug>/outbox/extract/b001.md`（可粘贴的任务包）、`outbox/summary/b001.md`、`TASKS.md`。
+
+#### `chipdoc outbox <workdir...>` 🔒
+
+重新生成任务包。用于“做了一部分、想继续”或改了 `--batch`。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `workdirs` | — | 工作目录 |
+| `--batch` | `4` | 每包块数 |
+
+```bash
+chipdoc outbox work/tms320f28054f --batch 2   # 已完成的块不会重复出现
+```
+
+### 3. 抽取（判断层）
+
+#### `chipdoc extract <workdir...>` 🌐
+
+把每个块交给模型，产出 `facts/raw/cNNN.json`。同一块已有结果会跳过（增量）。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `workdirs` | — | 工作目录 |
+| `--engine` | `llm` | `llm` 调模型 / `rules` 只用规则 / `both` 两者都跑后合并 |
+| `--jobs` | `6` | 并发数 |
+| `--chunks` | 全部 | 只跑指定块，如 `c010,c011` |
+| `--force` | 关 | 忽略已有结果重跑 |
+| `--provider` | `openai` | `openai` / `anthropic` / `command` / `external` |
+| `--model` | 端点默认 | 模型名 |
+| `--base-url` | 端点默认 | OpenAI 兼容地址 |
+| `--api-key-env` | 见环境变量 | 从哪个环境变量读 key |
+| `--json-mode` | 关 | 请求 JSON 模式 |
+| `--config` | 无 | 多模型配置，见下文 |
+
+```bash
+# 任何 OpenAI 兼容端点
+chipdoc extract work/a --model qwen-max \
+  --base-url https://dashscope.aliyuncs.com/compatible-mode/v1 --api-key-env DASHSCOPE_API_KEY
+
+# 只重跑两块，换个模型对比效果
+chipdoc extract work/a --chunks c010,c011 --force --model 另一个模型
+
+# 只生成任务包，不调模型
+chipdoc extract work/a --provider external
+```
+
+| provider | 需要什么 | 说明 |
+|---|---|---|
+| `openai` | `base_url` + `model` + key | DeepSeek / Qwen / Kimi / vLLM / Ollama / LM Studio 等 |
+| `anthropic` | key | Claude Messages API |
+| `command` | `command: [...]` | prompt 走 stdin，答案读 stdout，如 `["ollama","run","qwen2.5"]` |
+| `external` | 无 | 只写任务包/请求文件，答案由外部写回 |
+
+#### `chipdoc show <workdir> <key>` 🔒
+
+打印某块（或某小节）的完整请求（system + user）。给 agent 读，或给你复制。
+
+| 参数 | 说明 |
+|---|---|
+| `workdir` | 工作目录 |
+| `key` | 块 id `c000`，或小节 id `s000` |
+| `--stage` | `extract`（默认）/ `summary` |
+
+```bash
+chipdoc show work/a c000
+chipdoc show work/a s000 --stage summary
+```
+
+#### `chipdoc submit <workdir> <key>` 🔒
+
+把一份 JSON 答案写进 `response/`。`key` 可以是块 id、小节 id，或任务包名 `b001`。
+
+| 参数 | 说明 |
+|---|---|
+| `workdir` | 工作目录 |
+| `key` | `c000` / `s000` / `b001` |
+| `--stage` | `extract`（默认）/ `summary` |
+| `--file` | JSON 文件；省略则读 stdin |
+
+```bash
+chipdoc submit work/a c000 --file facts.json
+echo '{"facts":[...]}' | chipdoc submit work/a c000
+```
+
+#### `chipdoc ingest <workdir...>` 🔒
+
+收编 `response/` 里的答案到 `facts/raw/`。支持三种格式：
+
+- 单块：`{"facts":[{field,value,page,quote}]}`，文件名即块 id
+- 批量：`{"facts":[{cid,field,value,page,quote}]}`，按 `cid` 自动拆分
+- 摘要批量：`{"sections":[{"sid":"s000","bullets":[...]}]}`
+
+```bash
+chipdoc ingest work/a
+```
+
+#### `chipdoc status <workdir...>` 🔒
+
+看各阶段进度：多少块完成、校验保留/丢弃、摘要几节、profile 是否已生成。
+
+```bash
+chipdoc status work/a
+# extract : 40/76 完成 · 规则引擎 13 条
+# verify  : 保留 22（逐字 20），丢弃 2
+# summary : 待处理 12 节
+```
+
+#### `chipdoc pending <workdir...>` 🔒
+
+列出还没处理的块或小节。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `workdirs` | — | 工作目录 |
+| `--stage` | `extract` | `extract` / `summary` |
+| `--limit` | `20` | 最多列几条 |
+
+```bash
+chipdoc pending work/a --limit 5
+chipdoc pending work/a --stage summary
+```
+
+### 4. 校验与浓缩
+
+#### `chipdoc verify <workdir...>` 🔒
+
+页码校验：把每条 fact 的 `quote` 拿到对应页原文里做 NFKC + 去空白比对。
+
+- 逐字命中 → `verified`
+- 只有取值命中 → `page_only`（降级保留）
+- 都不命中 → `rejected`，写入 `verified.json` 的 `dropped`
+
+```bash
+chipdoc verify work/a
+# 输入 40 条，保留 37（逐字 35，页级 2），丢弃 3
+```
+
+#### `chipdoc summarize <workdir...>` 🌐
+
+按目录 level 1/2 分节生成要点，每条要求带 `[p.N]`；脚本还会做 bigram 落地检查，编造页码的要点会被丢弃。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `workdirs` | — | 工作目录 |
+| `--jobs` | `4` | 并发 |
+| `--force` | 关 | 重新生成 |
+| provider 参数 | 同上 | 可单独换模型 |
+
+```bash
+chipdoc summarize work/a --provider anthropic --model claude-sonnet-4-5
+chipdoc summarize work/a --provider external   # 只出浓缩任务包
+```
+
+### 5. 汇总与输出（全部 🔒）
+
+#### `chipdoc merge <workdir...>` 🔒
+
+合并 `facts/verified.json` + `summary/sections.json` → `profile.json`（字段去重、选优、保留备选值）。
+
+```bash
+chipdoc merge work/a
+```
+
+#### `chipdoc render` / `chipdoc compare` 🔒
+
+从所有 `profile.json` 生成：
+
+- `out/docs/<slug>/summary.md`（参数表 + 分节要点 + 其他发现）
+- `out/matrix.md` / `matrix.csv` / `matrix.json`
+- `out/diff.md` / `diff.json`（相对上次快照）
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--work` | `work` | 工作目录根 |
+| `--out` | `out` | 输出目录 |
+
+```bash
+chipdoc render --work work --out out
+chipdoc compare                 # 只是 render 的别名
+```
+
+#### `chipdoc finish <workdir...>` 🔒
+
+本地收尾一条龙：`ingest → verify → merge → render`。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `workdirs` | — | 工作目录（可多个） |
+| `--out` | `out` | 输出目录 |
+| `--work` | `work` | 保留参数，收尾按工作目录自动定位根 |
+
+```bash
+chipdoc finish work/a work/b --out out
+```
+
+### 6. 一条龙
+
+#### `chipdoc run <pdf...>` / `chipdoc analyze <pdf...>` 🌐
+
+`index → extract → verify → summarize → merge → render`。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `pdfs` | — | 一个或多个 PDF |
+| `--work` | `work` | 工作目录根 |
+| `--out` | `out` | 输出目录 |
+| `--engine` | `llm` | `llm` / `rules` / `both` |
+| `--jobs` | `6` | 并发 |
+| `--kind` | 自动 | 文档类型 |
+| `--fields` | 无 | 自定义字段集 |
+| `--refresh` | 关 | 全部重跑 |
+| provider 参数 | 同上 | 模型配置 |
+
+```bash
+chipdoc run 手册.pdf docs/另一份.pdf --jobs 8
+chipdoc analyze 手册.pdf --engine rules          # 无 key 的粗基线
+```
+
+## 参数速查表
+
+| 参数 | 适用命令 | 作用 |
+|---|---|---|
+| `--work` | index/prepare/render/finish/run/compare | 工作目录根，默认 `work` |
+| `--out` | prepare/render/finish/run/compare | 输出目录，默认 `out` |
+| `--kind` | index/prepare/run/inspect | `datasheet` / `trm` / `generic` |
+| `--fields` | index/prepare/run | 自定义字段集 JSON |
+| `--refresh` | index/prepare/run | 忽略缓存重建 |
+| `--rules` | prepare | 同时跑规则引擎基线 |
+| `--batch` | prepare/outbox | 每包块数，默认 4 |
+| `--engine` | extract/run | `llm` / `rules` / `both` |
+| `--jobs` | extract/summarize/run | 并发数 |
+| `--chunks` | extract | 只跑指定块 |
+| `--force` | extract/summarize | 忽略已有结果重跑 |
+| `--stage` | show/submit/pending | `extract` / `summary` |
+| `--limit` | pending | 列几条 |
+| `--file` | submit | 从文件读 JSON |
+| `--config` | extract/summarize/run | 多模型配置 |
+| `--provider` | extract/summarize/run | `openai` / `anthropic` / `command` / `external` |
+| `--model` | extract/summarize/run | 模型名 |
+| `--base-url` | extract/summarize/run | OpenAI 兼容端点 |
+| `--api-key-env` | extract/summarize/run | key 的环境变量名 |
+| `--json-mode` | extract/summarize/run | 请求 JSON 模式 |
+
+## 环境变量与配置文件
+
+| 变量 | 用途 |
+|---|---|
+| `DEEPSEEK_API_KEY` | `openai` provider 默认 key（也认 `OPENAI_API_KEY`） |
+| `ANTHROPIC_API_KEY` | `anthropic` provider 默认 key |
+| `OPENAI_BASE_URL` | 默认端点，缺省 `https://api.deepseek.com/v1` |
+| `CHIPDOC_MODEL` | 默认模型名 |
+
+多模型配置（`chipdoc.example.json`），按阶段指定：
 
 ```json
 {
@@ -87,109 +408,59 @@ chipdoc merge work/<slug> && chipdoc render --work work --out out
 ```
 
 ```bash
-chipdoc extract work/a --config chipdoc.json
+chipdoc extract   work/a --config chipdoc.json
 chipdoc summarize work/a --config chipdoc.json
 ```
 
-单个阶段的临时覆盖：`--provider/--model/--base-url/--api-key-env`（优先级高于配置文件）。
-想只重跑某些块、顺便换个模型试：
-
-```bash
-chipdoc extract work/a --chunks c010,c011 --force --model qwen-max --base-url ...
-```
-
-## 完全不用模型（外部交接）
-
-```bash
-chipdoc index manual.pdf --work work                 # 切块
-chipdoc extract work/manual --provider external      # 只生成 prompt/extract/*.json
-#  —— 这里换成任何工具：本地脚本、别的 AI、人工、批处理队列 ——
-#  把每个 cNNN.json 的答案写到 response/extract/cNNN.json
-chipdoc ingest  work/manual                          # 收编
-chipdoc verify  work/manual                          # 页码校验，编造的直接丢
-chipdoc summarize work/manual --provider external    # 浓缩同样可以外部做
-chipdoc ingest work/manual && chipdoc merge work/manual
-chipdoc render --work work --out out
-```
-
-请求文件长这样（自带 system/user，任何能发 prompt 的工具都能接）：
-
-```json
-{"cid":"c000","stage":"extract","system":"……","user":"……","expect":"json",
- "output":"facts/raw/c000.json"}
-```
-
-答案文件就是模型原样输出的 JSON：`{"facts":[{"field":"max_freq","value":"60 MHz","page":1,"quote":"…"}]}`。
-解析失败的文件会被跳过并在 `ingest` 里计数，不会污染结果。
-
-## 快速开始（有模型）
-
-```bash
-python3 -m venv .venv && .venv/bin/pip install pymupdf     # 只依赖 PyMuPDF
-
-export DEEPSEEK_API_KEY=sk-...
-.venv/bin/python -m chipdoc run tms320f28054f.pdf docs/tms320f280049c.pdf --jobs 8
-
-# 或者分阶段来，便于换模型/返工
-.venv/bin/python -m chipdoc index   *.pdf --work work
-.venv/bin/python -m chipdoc extract work/tms320f28054f --model ... --base-url ...
-.venv/bin/python -m chipdoc verify  work/tms320f28054f
-.venv/bin/python -m chipdoc summarize work/tms320f28054f --model ...
-.venv/bin/python -m chipdoc merge   work/tms320f28054f
-.venv/bin/python -m chipdoc render  --work work --out out
-```
-
-没 key 也能跑粗基线：
-
-```bash
-.venv/bin/python -m chipdoc run *.pdf --engine rules
-```
-
-## 为什么页码能溯源
-
-抽取 prompt 强制每条结论给 `page` + 逐字 `quote`，`verify` 阶段用 NFKC + 去空白后的字符串比对回查原文：
-
-- 页码越界 / 该页无文本层 → 丢弃
-- 引文片段命中 ≥60% 或整段逐字命中 → `verified`
-- 只有取值命中 → `page_only`（保留但降级）
-- 都不命中 → `rejected`，写入 `facts/verified.json` 的 `dropped`，带原因
-
-这一步不花 token，却能把"页码幻觉"挡在结果外；每个块用哪个模型抽的、原始输出是什么，都留在 `facts/raw/`。
-
-## 产物
+## 目录与产物
 
 ```
 work/<slug>/
-├── pages.json / toc.json / doc.json
-├── chunks/c000.json            # 带 <<<p.N>>> 的块文本
-├── facts/raw/c000.json         # 该块模型原始输出（可审计）
-├── facts/verified.json         # 保留/丢弃 + 统计
-├── summary/sections.json       # 分节要点
-└── profile.json                # 归并后的文档画像
+├── doc.json                  # 路径、sha、标题、类型、字段集
+├── pages.json                # 逐页文本
+├── toc.json                  # [level, title, page]
+├── chunks/c000.json          # {"cid","pages","sections","text"}，text 带 <<<p.N>>>
+├── outbox/extract/b001.md    # 手动任务包（含字段清单 + 多个块）
+├── outbox/summary/b001.md    # 浓缩任务包
+├── prompt/extract/c000.json  # 程序化交接用的单块请求
+├── response/extract/b001.json# 你/模型写回的答案
+├── facts/raw/c000.json       # 每块抽取出的事实（可审计）
+├── facts/verified.json       # 保留 + 丢弃 + 统计
+├── summary/sections.json     # 分节要点
+├── TASKS.md                  # 任务清单
+└── profile.json              # 归并后的文档画像
+
 out/
-├── docs/<slug>/summary.md      # 参数表 + 分节要点，每条 [p.N] 链接
-├── matrix.md / matrix.csv      # 横向对比（行=字段，列=文档）
-├── diff.md                     # 相对上次快照：新增文档 / 取值变化 / 新增字段
-└── state.json                  # 快照，用于增量
+├── docs/<slug>/summary.md    # 参数表 + 分节要点 + 其他发现
+├── matrix.md / .csv / .json  # 横向对比
+├── diff.md / diff.json       # 相对上次快照的增量
+└── state.json                # 快照（用于 diff）
 ```
 
-## 增量
+## 页码溯源原理
 
-`chipdoc extract` 遇到已有 `facts/raw/<cid>.json` 会跳过；新增一份 PDF 时只跑那一份的块，`render` 自动生成 diff（新增文档、字段变化、新增字段）。改了 prompt 版本或想全部重来用 `--force`。
+1. 抽取 prompt 强制每条 fact 给 `page` + `quote`
+2. `verify` 用 NFKC + 去空白后的字符串比对回查该页原文
+3. 命中 → `verified`；仅取值命中 → `page_only`；都不中 → 丢弃并记原因
 
-## 成本 / 耗时（实测参考）
+不花 token，却能挡住“页码幻觉”。被丢弃的数量每次都会打印，丢弃率高说明引文不逐字。
+
+## 成本与性能
 
 | 文档 | 页数 | 字符 | 块数 | rules | LLM 估算 |
 |---|---|---|---|---|---|
-| TMS320F28054F（中） | 159 | 252k | 76 | 0.7 s | ~11.5 万 input token，8 并发约 2–3 分钟 |
-| TMS320F28004x（英） | 275 | 521k | 156 | 1.0 s | ~24 万 input token，8 并发约 4–6 分钟 |
+| TMS320F28054F（中） | 159 | 252k | 76 | ~1 s | ~11.5 万 input token，8 并发 2–3 分钟 |
+| TMS320F28004x（英） | 275 | 521k | 156 | ~2 s | ~24 万 input token，8 并发 4–6 分钟 |
+
+第二次分析同一文档：0 次模型调用（结果复用）。
 
 ## 已知限制
 
-- 扫描版 PDF（无文本层）需要先 OCR；`chipdoc inspect` 会列出这些页。
-- 表格在文本层里常被"竖着"展开；规则引擎用 label-walk 兜底，LLM 路径可用 `page_tables()`（`chipdoc/index.py`，按页缓存，约 0.5 s/页）拿到 markdown 表格。
-- 规则引擎是粗基线（频率/存储/温度/供电/封装/常见外设计数），连接器数量这类说法不统一的信息会漏，以模型结果为准。
-- TRM 走同一流程，字段集切换为 `TRM_FIELDS`。
+- 扫描件（无文本层）需先 OCR；`doctor` 会列出受影响的页
+- 表格在文本层里常被竖排展开；需要精确表格可用 `page_tables()`（`chipdoc/index.py`，约 0.5 s/页）
+- 规则引擎是粗基线，连接器数量这类说法不统一的字段会漏
+- 引用的是 **PDF 物理页序**；印刷页码与物理页不一致时尚未做偏移校正
+- 寄存器级对照（每个寄存器一条记录）尚未支持，当前对比粒度是文档级
 
 ## 测试
 
@@ -197,4 +468,4 @@ out/
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-14 个用例：页码拒绝/降级、归并优先级、diff 等价、全页覆盖、规则基线、本地假模型端到端、二次复用、**分阶段换模型（command provider）**、**纯外部交接全流程**。
+17 个用例：错页拒绝、页级降级、归并优先级、diff 等价、全页覆盖、规则基线、假模型端到端、增量复用、分阶段换模型（command）、纯外部交接、generic 文档 + agent 循环、本地准备→手动答题→本地收尾。
