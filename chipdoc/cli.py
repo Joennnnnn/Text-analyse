@@ -57,7 +57,7 @@ def _wd(paths: list[str]) -> list[Workdoc]:
 def cmd_index(args) -> int:
     for pdf in args.pdfs:
         wd = stage_index(pdf, args.work, force=args.refresh,
-                         kind=args.kind, fields_path=args.fields)
+                         kind=args.kind, fields_path=args.fields, backend=args.backend)
         print(f"+ {wd.slug}: {wd.index.page_count} 页 / {len(wd.index.chunks)} 块 / "
               f"目录 {len(wd.index.toc)} 条 → {wd.dir}")
 
@@ -144,7 +144,8 @@ def cmd_run(args) -> int:
     for pdf in args.pdfs:
         t0 = time.time()
         wd = stage_index(pdf, args.work, force=args.refresh,
-                         kind=getattr(args, "kind", None), fields_path=getattr(args, "fields", None))
+                         kind=getattr(args, "kind", None), fields_path=getattr(args, "fields", None),
+                         backend=getattr(args, "backend", "auto"))
         print(f"+ {wd.slug}: {wd.index.page_count} 页 / {len(wd.index.chunks)} 块")
         ex = stage_extract(wd, provider, engine=engine, jobs=args.jobs, force=args.refresh)
         if engine == "rules":
@@ -243,7 +244,7 @@ def cmd_prepare(args) -> int:
     external = ExternalProvider(ProviderConfig(kind="external"))
     for pdf in args.pdfs:
         wd = stage_index(pdf, args.work, force=args.refresh,
-                         kind=args.kind, fields_path=args.fields)
+                         kind=args.kind, fields_path=args.fields, backend=args.backend)
         print(f"+ {wd.slug}: {wd.index.page_count} 页 / {len(wd.chunk_files())} 块 / 类型 {wd.index.kind}")
         if args.rules:
             r = stage_extract(wd, external, engine="rules")
@@ -369,10 +370,10 @@ def cmd_doctor(args) -> int:
     """环境与文档体检：哪些能力可用、这份 PDF 能不能直接跑。"""
     import shutil
 
-    import pymupdf
+    from .backend import Doc, _has_pymupdf
 
     print(f"python      {sys.version.split()[0]}")
-    print(f"pymupdf     {pymupdf.__version__}")
+    print(f"pymupdf     {'已安装（自动优先使用）' if _has_pymupdf() else '未安装（使用内置纯 Python 解析）'}")
     print("可选工具：")
     for tool, why in (("tesseract", "OCR 引擎"), ("ocrmypdf", "整本 OCR"),
                       ("pdftotext", "外部文本抽取"), ("gs", "Ghostscript")):
@@ -382,24 +383,22 @@ def cmd_doctor(args) -> int:
         print("\n提示：加一个 PDF 路径可以体检具体文档。")
         return 0
 
-    doc = pymupdf.open(args.pdf)
-    n = doc.page_count
-    texts = [doc[i].get_text("text") for i in range(n)]
-    empty = [i + 1 for i, t in enumerate(texts) if len(t.strip()) < 40]
-    chars = sum(len(t) for t in texts)
-    toc = doc.get_toc()
-    images = sum(len(doc[i].get_images(full=True)) for i in range(min(n, 30)))
+    with Doc(args.pdf, backend=args.backend) as doc:
+        n = doc.page_count
+        texts = [doc.page_text(i) for i in range(n)]
+        empty = [i + 1 for i, t in enumerate(texts) if len(t.strip()) < 40]
+        chars = sum(len(t) for t in texts)
+        toc = doc.toc()
+        meta = doc.metadata()
     print(f"\n文档：{args.pdf}")
+    print(f"  解析后端      {doc.name}")
     print(f"  页数          {n}")
-    print(f"  加密          {'是（需先解密）' if doc.is_encrypted else '否'}")
+    print(f"  标题          {meta.get('title') or '(无)'}")
     print(f"  文本层        {n - len(empty)}/{n} 页有文本，共 {chars:,} 字符")
     print(f"  需 OCR 的页   {len(empty)} 页" + (f"，例如 {empty[:10]}" if empty else ""))
     print(f"  书签目录      {len(toc)} 条" + ("" if toc else "（无，将退化为按页切分）"))
-    print(f"  前 30 页图片  {images} 张")
     print(f"  估算 token    ~{int(chars / 2.2):,}（切块后每块约 3.3k 字符）")
-    if doc.is_encrypted:
-        verdict = "不可直接分析：需要先解密"
-    elif not empty:
+    if not empty:
         verdict = "可直接分析"
     elif len(empty) == n:
         verdict = "纯扫描件：必须先 OCR"
@@ -430,6 +429,8 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("doctor", help="体检：环境能力 + PDF 是否可分析")
     p.add_argument("pdf", nargs="?", default=None, help="可选：体检指定 PDF")
+    p.add_argument("--backend", choices=["auto", "pure", "pymupdf"], default="auto",
+                   help="强制使用某个解析后端")
     p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser("inspect", help="预览页数/目录/切块/无文本层页")
@@ -443,6 +444,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--kind", default=None, help="datasheet / trm / generic（默认自动判断）")
     p.add_argument("--fields", default=None, help="自定义字段集 JSON")
     p.add_argument("--refresh", action="store_true", help="忽略已有索引，重新建立")
+    p.add_argument("--backend", choices=["auto", "pure", "pymupdf"], default="auto",
+                   help="PDF 解析后端：auto 优先 PyMuPDF，没有则用内置纯 Python")
     p.set_defaults(func=cmd_index)
 
     p = sub.add_parser("prepare", help="①+ 本地准备：索引 + 任务包 + 清单（不调用模型）")
@@ -454,6 +457,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--refresh", action="store_true", help="忽略缓存，重新建立")
     p.add_argument("--rules", action="store_true", help="同时跑一遍规则引擎基线")
     p.add_argument("--batch", type=int, default=4, help="每个任务包放几个块，默认 4")
+    p.add_argument("--backend", choices=["auto", "pure", "pymupdf"], default="auto",
+                   help="PDF 解析后端")
     p.set_defaults(func=cmd_prepare)
 
     p = sub.add_parser("outbox", help="重新生成可复制粘贴的任务包（不调用模型）")
@@ -519,6 +524,8 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--refresh", action="store_true", help="忽略缓存，全部重跑")
         p.add_argument("--kind", default=None, help="datasheet / trm / generic")
         p.add_argument("--fields", default=None, help="自定义字段集 JSON")
+        p.add_argument("--backend", choices=["auto", "pure", "pymupdf"], default="auto",
+                       help="PDF 解析后端")
         _provider_args(p)
         p.set_defaults(func=cmd_run)
 

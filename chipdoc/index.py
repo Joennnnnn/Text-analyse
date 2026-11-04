@@ -16,7 +16,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import pymupdf
+from .backend import Doc
 
 # 页眉页脚噪声（TI / 常见芯片手册）
 _NOISE = [
@@ -143,9 +143,9 @@ def _detect_kind(title: str, toc: list[Section], pages: list[str], meta: dict | 
     return "trm" if toc and reg / len(toc) > 0.5 else "datasheet"
 
 
-def _read_toc(doc: pymupdf.Document) -> list[Section]:
+def _read_toc(toc_raw: list[tuple[int, str, int]]) -> list[Section]:
     toc = []
-    for level, title, page in doc.get_toc(simple=True):
+    for level, title, page in toc_raw:
         t = re.sub(r"\s+", " ", title).strip()
         if not t:
             continue
@@ -201,7 +201,11 @@ def build_chunks(pages: list[str], toc: list[Section],
 
 
 def page_tables(path: str, page_no: int) -> list[str]:
-    """单页表格 → markdown（慢，调用方负责缓存）。"""
+    """单页表格 → markdown（需要 PyMuPDF；纯后端返回空）。"""
+    try:
+        import pymupdf
+    except ImportError:
+        return []
     with pymupdf.open(path) as doc:
         page = doc[page_no - 1]
         found = page.find_tables()
@@ -222,13 +226,13 @@ def page_tables(path: str, page_no: int) -> list[str]:
 
 
 def build_index(pdf_path: str | Path, kind: str | None = None,
-                with_headers: bool = True) -> DocIndex:
+                with_headers: bool = True, backend: str = "auto") -> DocIndex:
     path = Path(pdf_path).resolve()
-    with pymupdf.open(path) as doc:
-        pages = [_clean_page(doc[i].get_text("text")) for i in range(doc.page_count)]
-        meta = dict(doc.metadata or {})
+    with Doc(str(path), backend=backend) as doc:
+        pages = [_clean_page(doc.page_text(i)) for i in range(doc.page_count)]
+        meta = {k.lower(): v for k, v in (doc.metadata() or {}).items()}
         title = (meta.get("title") or path.stem).strip()
-        toc = _read_toc(doc)
+        toc = _read_toc(doc.toc())
     if len(toc) < 3:
         toc = _fallback_toc(pages)
     kind = kind or _detect_kind(title, toc, pages, meta)

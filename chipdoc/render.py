@@ -68,6 +68,13 @@ def summary_markdown(profile: Profile, out_dir: Path) -> str:
         for b in sec["bullets"]:
             lines.append(f"- {b}")
         lines.append("")
+    try:
+        from .plugins import extra_markdown
+        extra = extra_markdown(profile)
+        if extra:
+            lines += ["", "## 附录：插件输出", "", extra]
+    except Exception:
+        pass
     return "\n".join(lines).rstrip() + "\n"
 
 

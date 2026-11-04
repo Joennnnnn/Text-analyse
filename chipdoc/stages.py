@@ -95,16 +95,17 @@ class Workdoc:
 
 
 def stage_index(pdf: str | Path, work_root: str | Path, force: bool = False,
-                kind: str | None = None, fields_path: str | None = None) -> Workdoc:
+                kind: str | None = None, fields_path: str | None = None,
+                backend: str = "auto") -> Workdoc:
     pdf = Path(pdf).resolve()
     root = Path(work_root).resolve()
     slug = slugify(pdf)
     wd = root / slug
     if (wd / "doc.json").exists() and not force:
         wd_obj = Workdoc(wd)
-        if wd_obj.doc["sha"] == build_index(pdf, kind=None).sha:
+        if wd_obj.doc["sha"] == build_index(pdf, kind=None, backend=backend).sha:
             return wd_obj
-    idx = build_index(pdf, kind=kind)
+    idx = build_index(pdf, kind=kind, backend=backend)
     _write(root / slug / "doc.json", {
         "path": str(pdf), "sha": idx.sha, "title": idx.title, "kind": idx.kind,
         "pages": idx.page_count, "meta": idx.meta, "prompt_version": PROMPT_VERSION,
@@ -339,6 +340,11 @@ def stage_ingest(wd: Workdoc) -> dict:
 def stage_verify(wd: Workdoc) -> dict:
     facts = wd.load_facts()
     kept, dropped = verify_facts(facts, wd.index)
+    try:
+        from .plugins import apply_facts
+        kept = apply_facts(kept, wd.index)
+    except Exception:
+        pass
     stats = {
         "input": len(facts), "kept": len(kept), "dropped": len(dropped),
         "verified": sum(1 for f in kept if f.confidence == "verified"),

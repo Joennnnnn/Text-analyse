@@ -13,14 +13,15 @@
 1. [它能做什么](#它能做什么)
 2. [安装与快速开始](#安装与快速开始)
 3. [三种工作方式](#三种工作方式)
-4. [命令参考](#命令参考)
-5. [参数速查表](#参数速查表)
-6. [环境变量与配置文件](#环境变量与配置文件)
-7. [目录与产物](#目录与产物)
-8. [页码溯源原理](#页码溯源原理)
-9. [成本与性能](#成本与性能)
-10. [已知限制](#已知限制)
-11. [测试](#测试)
+4. [离线运行与扩展](#离线运行与扩展)
+5. [命令参考](#命令参考)
+6. [参数速查表](#参数速查表)
+7. [环境变量与配置文件](#环境变量与配置文件)
+8. [目录与产物](#目录与产物)
+9. [页码溯源原理](#页码溯源原理)
+10. [成本与性能](#成本与性能)
+11. [已知限制](#已知限制)
+12. [测试](#测试)
 
 ## 它能做什么
 
@@ -59,6 +60,89 @@ chipdoc finish work/<slug> --out out
 | B. agent 驱动 | 当前 agent | 否 | `prepare` → `show` → `submit` → `finish` |
 | C. 纯手动 | 聊天窗口里的模型 | 否 | `prepare --batch` → 复制 `outbox/*.md` → 存 `response/*.json` → `finish` |
 
+## 离线运行与扩展
+
+### 方式一：塞进已有的 venv（推荐，不需要 pip）
+
+离线机器上已经有一个 `.venv` 时，把源码目录里的包复制进去即可：
+
+```bash
+# 在能访问源码的地方执行（复制一个目录，不联网、不装包）
+python3 tools/install_into_venv.py /目标机/.venv
+
+# 目标机上直接用这个 venv
+/目标机/.venv/bin/chipdoc doctor 手册.pdf
+/目标机/.venv/bin/python -m chipdoc run 手册.pdf --engine rules
+```
+
+它会做三件事：把 `chipdoc/` 复制到 venv 的 site-packages、复制 `plugins/`（如果有）、在 `bin/` 下生成 `chipdoc` 启动器。venv 里没有 PyMuPDF 也能跑（自动用内置纯 Python 解析）。
+
+### 方式二：把环境一起打包带走
+
+```bash
+python tools/build_bundle.py --profile pdf     # 约 27 MB 压缩包，带轻量 PyMuPDF
+python tools/build_bundle.py --profile lean    # 几 MB，无第三方依赖
+python tools/build_bundle.py --profile full    # 完整复制当前 .venv（很大）
+
+# 目标机解压后
+./run.sh doctor 手册.pdf
+./run.sh prepare 手册.pdf --work work --batch 4
+```
+
+| profile | 体积 | 内容 | 构建时需要联网 |
+|---|---|---|---|
+| `lean` | ~4 MB | 仅 chipdoc + 内嵌解析器 | 否 |
+| `pdf` | ~27 MB | 加 PyMuPDF 1.x（表格/更快） | 是（装一次） |
+| `full` | ~280 MB | 完整复制源 venv | 否 |
+
+产物：`dist/chipdoc-bundle/` 和 `dist/chipdoc-bundle.tar.gz`，带 `run.sh` 和 `README-OFFLINE.txt`。
+
+> 可搬迁的前提：目标机与构建机同架构、同 glibc，且 venv 的 `pyvenv.cfg` 里 `home` 指向的 Python 路径存在。跨发行版/大版本时，最稳的是「目标机已有 Python → 用方式一塞包」，或改用 `lean` + 纯解析器。
+
+### 方式三：单文件 zipapp
+
+```bash
+python3 tools/build_pyz.py                 # dist/chipdoc.pyz（约 50 KB）
+python3 dist/chipdoc.pyz doctor 手册.pdf
+```
+
+只依赖 Python 3.11+ 标准库，适合“机器上有 python3、但什么包都不能装”的场景。
+
+### 解析后端
+
+- 装了 PyMuPDF → 自动优先使用（快、支持表格检测）
+- 没装 → 自动退回内置纯 Python 解析器（`chipdoc/pdfread.py`）
+- 强制指定：`--backend pure|pymupdf|auto`，或 `CHIPDOC_BACKEND=pure`
+
+内置解析器覆盖：经典 xref（含增量更新）、FlateDecode/ASCIIHex/ASCII85/RunLength、页面树、书签目录、Type0(Identity-H)+ToUnicode、简单字体 Differences、Tj/TJ/Tm/Td 等文本算子。
+不支持并会明确报错：加密 PDF、xref 流、对象流、OCR。
+
+### 插件：不装包也能扩展
+
+把 `xxx.py` 放进下面任一位置，启动时自动加载：
+
+1. `CHIPDOC_PLUGINS` 环境变量里的目录（`:` 分隔）
+2. 当前目录的 `plugins/`
+3. `~/.chipdoc/plugins/`
+
+可选钩子（普通函数，异常不影响主流程）：
+
+```python
+def fields(kind):            # 追加字段，进入抽取 prompt 和对比表
+    return [{"id": "pin_count", "label": "引脚数", "hint": "封装引脚数"}]
+
+def on_facts(facts, index):  # 页码校验之后、归并之前
+    return facts
+
+def on_profile(profile):     # 归并后的字典
+    return profile
+
+def markdown(profile):       # 追加到 summary.md 末尾
+    return "## 备注\n- ..."
+```
+
+完整例子见 `examples/plugin_example.py`（复制到 `plugins/` 即生效）。
+
 ## 命令参考
 
 通用约定：
@@ -78,6 +162,7 @@ chipdoc finish work/<slug> --out out
 | 参数 | 说明 |
 |---|---|
 | `pdf` | 可选。不传只报环境 |
+| `--backend` | 强制解析后端：`auto` / `pure` / `pymupdf` |
 
 ```bash
 chipdoc doctor                  # 只看环境
@@ -112,6 +197,7 @@ chipdoc inspect 手册.pdf --kind trm
 | `--kind` | 自动 | `datasheet` / `trm` / `generic` |
 | `--fields` | 无 | 自定义字段集 JSON（`[{"id","label","hint"}]`） |
 | `--refresh` | 关 | 忽略已有索引，强制重建 |
+| `--backend` | `auto` | `auto` / `pure` / `pymupdf` |
 
 ```bash
 chipdoc index 手册.pdf 另一份.pdf --work work --kind datasheet
@@ -133,6 +219,7 @@ chipdoc index 手册.pdf 另一份.pdf --work work --kind datasheet
 | `--batch` | `4` | 每个任务包包含几个块（3–5 适合手动粘贴） |
 | `--rules` | 关 | 同时跑规则引擎，先得到一份粗基线 |
 | `--refresh` | 关 | 忽略缓存重建 |
+| `--backend` | `auto` | PDF 解析后端 |
 
 ```bash
 chipdoc prepare 手册.pdf --work work --out out --batch 4 --rules
@@ -350,6 +437,7 @@ chipdoc finish work/a work/b --out out
 | `--kind` | 自动 | 文档类型 |
 | `--fields` | 无 | 自定义字段集 |
 | `--refresh` | 关 | 全部重跑 |
+| `--backend` | `auto` | PDF 解析后端 |
 | provider 参数 | 同上 | 模型配置 |
 
 ```bash
@@ -381,6 +469,7 @@ chipdoc analyze 手册.pdf --engine rules          # 无 key 的粗基线
 | `--base-url` | extract/summarize/run | OpenAI 兼容端点 |
 | `--api-key-env` | extract/summarize/run | key 的环境变量名 |
 | `--json-mode` | extract/summarize/run | 请求 JSON 模式 |
+| `--backend` | doctor/index/prepare/run | `auto` / `pure` / `pymupdf` |
 
 ## 环境变量与配置文件
 
@@ -461,6 +550,8 @@ out/
 - 规则引擎是粗基线，连接器数量这类说法不统一的字段会漏
 - 引用的是 **PDF 物理页序**；印刷页码与物理页不一致时尚未做偏移校正
 - 寄存器级对照（每个寄存器一条记录）尚未支持，当前对比粒度是文档级
+- 内置纯 Python 解析器不处理加密 PDF、xref 流、对象流；这类文件会明确报错，请改用 PyMuPDF 后端
+- 纯后端不提供表格结构抽取（`page_tables` 直接返回空），速度约为 PyMuPDF 的 1/5
 
 ## 测试
 

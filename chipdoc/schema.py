@@ -77,7 +77,13 @@ MULTI_VALUE_FIELDS = {"other"}
 
 
 def fields_for(kind: str) -> tuple[FieldSpec, ...]:
-    return {"datasheet": DATASHEET_FIELDS, "trm": TRM_FIELDS}.get(kind, GENERIC_FIELDS)
+    base = {"datasheet": DATASHEET_FIELDS, "trm": TRM_FIELDS}.get(kind, GENERIC_FIELDS)
+    try:
+        from .plugins import fields as _plugin_fields
+        extra = _plugin_fields(kind)
+    except Exception:
+        extra = []
+    return tuple(base) + tuple(extra)
 
 
 def load_fields(path: str) -> tuple[FieldSpec, ...]:

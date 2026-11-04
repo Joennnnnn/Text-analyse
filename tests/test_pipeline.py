@@ -241,6 +241,49 @@ class TestExternalHandoff(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestPureBackend(unittest.TestCase):
+    """不装 PyMuPDF 也能解析：页数、目录、正文。"""
+
+    def test_structure(self):
+        from chipdoc.index import build_index
+        idx = build_index(TI_PDF, backend="pure")
+        self.assertEqual(idx.page_count, 159)
+        self.assertGreaterEqual(len(idx.toc), 190)
+        self.assertEqual(idx.toc[0].page, 1)
+        self.assertIn("TMS320F2805x", idx.page_text(1))
+
+    def test_rules_on_pure_backend(self):
+        from chipdoc.index import build_index
+        facts, _ = extract_rules(build_index(TI_PDF, backend="pure"))
+        by = {f.field: f for f in facts}
+        self.assertIn("max_freq", by)
+        self.assertIn("60", by["max_freq"].value)
+
+
+class TestPlugins(unittest.TestCase):
+    def test_fields_and_markdown(self):
+        import chipdoc.plugins as plugins
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            pdir = tmp / "plugins"
+            pdir.mkdir()
+            (pdir / "demo.py").write_text(
+                "def fields(kind):\n"
+                "    return [{\"id\": \"pins\", \"label\": \"引脚数\", \"hint\": \"封装引脚数\"}]\n"
+                "def markdown(profile):\n"
+                "    return '## 备注\\n- 插件生效'\n",
+                encoding="utf-8")
+            os.environ["CHIPDOC_PLUGINS"] = str(pdir)
+            plugins._loaded = None
+            from chipdoc.schema import fields_for
+            self.assertIn("pins", [f.id for f in fields_for("datasheet")])
+            self.assertIn("插件生效", plugins.extra_markdown({}))
+        finally:
+            os.environ.pop("CHIPDOC_PLUGINS", None)
+            plugins._loaded = None
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class TestPrepareFinish(unittest.TestCase):
     """本地准备（不调模型）→ agent 答题 → 本地收尾（不调模型）。"""
 
