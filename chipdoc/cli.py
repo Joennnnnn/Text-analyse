@@ -17,6 +17,7 @@ import sys
 import time
 from pathlib import Path
 
+from . import __version__
 from .index import build_index
 from .providers import ExternalProvider, ProviderConfig, ProviderError, load_config, make_provider, resolve_config
 from .render import (build_matrix, diff_snapshots, make_snapshot, write_diff, write_doc,
@@ -366,6 +367,26 @@ def cmd_submit(args) -> int:
     return 0
 
 
+def cmd_where(args) -> int:
+    """我在哪、装了哪些东西、插件从哪来。"""
+    import platform
+
+    from . import plugins as plugin_mod
+
+    print(f"chipdoc     {__version__}")
+    print(f"python      {sys.version.split()[0]} ({platform.platform()})")
+    print(f"解释器      {sys.executable}")
+    print(f"包位置      {Path(__file__).resolve().parent}")
+    print(f"当前目录    {Path.cwd()}")
+    print(f"前缀        {sys.prefix}" + ("  (venv)" if sys.prefix != sys.base_prefix else "  (系统 Python)"))
+    for d in (Path("work"), Path("out"), Path("dist")):
+        print(f"  {d.name:<8} {'存在 ' + str(d.resolve()) if d.exists() else '不存在'}")
+    mods = plugin_mod.load()
+    print(f"插件        {len(mods)} 个" + ("" if not mods else "：" + ", ".join(m.__name__ for m in mods)))
+    print(f"PDF 后端    {'pymupdf' if __import__('chipdoc.backend', fromlist=['_has_pymupdf'])._has_pymupdf() else 'pure-python'}")
+    return 0
+
+
 def cmd_doctor(args) -> int:
     """环境与文档体检：哪些能力可用、这份 PDF 能不能直接跑。"""
     import shutil
@@ -424,8 +445,12 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="chipdoc",
         description="芯片/电子类 PDF 分析流水线：索引 → 抽取 → 校验 → 浓缩 → 归并 → 渲染",
-        epilog="示例：chipdoc prepare 手册.pdf --work work --batch 4")
+        epilog="第一次用先跑：chipdoc where；体检文档：chipdoc doctor 文件.pdf")
+    ap.add_argument("-V", "--version", action="version", version=f"chipdoc {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True, metavar="命令")
+
+    p = sub.add_parser("where", help="显示安装位置/解释器/插件/后端，排查“东西在哪”")
+    p.set_defaults(func=cmd_where)
 
     p = sub.add_parser("doctor", help="体检：环境能力 + PDF 是否可分析")
     p.add_argument("pdf", nargs="?", default=None, help="可选：体检指定 PDF")
