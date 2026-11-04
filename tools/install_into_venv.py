@@ -21,11 +21,20 @@ IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo")
 
 
 def _venv_python(venv: Path) -> Path:
-    for name in ("bin/python", "bin/python3", "Scripts/python.exe"):
+    for name in ("bin/python", "bin/python3", "Scripts/python.exe", "Scripts/python3.exe"):
         p = venv / name
         if p.exists():
             return p
-    raise SystemExit(f"{venv} 不像一个 venv（找不到 bin/python）")
+    raise SystemExit(
+        f"{venv} 里既没有 bin/python 也没有 Scripts/python.exe。\n"
+        f"目录内容：{sorted(x.name for x in venv.iterdir()) if venv.exists() else '路径不存在'}\n"
+        "请先运行：python -m venv " + str(venv))
+
+
+def _scripts_dir(venv: Path) -> Path:
+    """POSIX 是 bin/，Windows 是 Scripts/。"""
+    scripts = venv / "Scripts"
+    return scripts if scripts.exists() else venv / "bin"
 
 
 def _site_packages(python: Path) -> Path:
@@ -49,14 +58,21 @@ def install(venv: str | Path, source: str | Path | None = None,
         if plugins.is_dir():
             shutil.copytree(plugins, venv / "plugins", ignore=IGNORE, dirs_exist_ok=True)
 
-    launcher = venv / "bin" / "chipdoc"
-    launcher.write_text(
-        f"#!{python}\n"
-        "import sys\n"
-        "from chipdoc.cli import main\n"
-        "sys.exit(main())\n",
-        encoding="utf-8")
-    launcher.chmod(0o755)
+    scripts = _scripts_dir(venv)
+    if scripts.name == "Scripts":          # Windows：生成 chipdoc.cmd
+        launcher = scripts / "chipdoc.cmd"
+        launcher.write_text(
+            "@echo off\r\n"
+            '"%~dp0python.exe" -m chipdoc %*\r\n', encoding="utf-8")
+    else:                                   # POSIX：生成 bin/chipdoc
+        launcher = scripts / "chipdoc"
+        launcher.write_text(
+            f"#!{python}\n"
+            "import sys\n"
+            "from chipdoc.cli import main\n"
+            "sys.exit(main())\n",
+            encoding="utf-8")
+        launcher.chmod(0o755)
     return dest
 
 
@@ -68,8 +84,9 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     dest = install(args.venv, args.source, with_plugins=not args.no_plugins)
     print(f"已安装到 {dest}")
-    print(f"启动器：{Path(args.venv).resolve()/'bin'/'chipdoc'}")
-    print(f"验证：{Path(args.venv).resolve()/'bin'/'chipdoc'} doctor")
+    venv = Path(args.venv).resolve()
+    print(f"启动器：{_scripts_dir(venv)}/{'chipdoc.cmd' if _scripts_dir(venv).name == 'Scripts' else 'chipdoc'}")
+    print(f"验证：{_scripts_dir(venv)}/chipdoc doctor")
     return 0
 
 

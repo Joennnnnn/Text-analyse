@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import shutil
 import tempfile
 import zipapp
@@ -30,4 +31,6 @@ def build() -> Path:
 
 if __name__ == "__main__":
     path = build()
-    print(f"{path}  ({path.stat().st_size / 1024:.0f} KB)")
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    (path.parent / "chipdoc.pyz.sha256").write_text(f"{digest}  {path.name}\n", encoding="utf-8")
+    print(f"{path}  ({path.stat().st_size / 1024:.0f} KB)  sha256={digest[:16]}…")

@@ -51,6 +51,10 @@ chipdoc finish work/<slug> --out out
 ```
 
 > 下文所有 `chipdoc` 指 `.venv/bin/chipdoc`（激活 venv 后直接可用）。不想安装时，把 `chipdoc` 换成 `.venv/bin/python -m chipdoc`，行为完全一致。
+>
+> 不想记路径就用仓库自带的包装脚本：Linux/macOS `./chipdoc.sh doctor 手册.pdf`，Windows `chipdoc.cmd doctor 手册.pdf`。它会自动挑 `.venv/bin/python` → `python3` → `python`。
+>
+> 命令里的 `python3` 只是解释器名字：如果你的 `python --version` 是 3.11+，全部换成 `python` 即可，行为相同。
 
 ## 三种工作方式
 
@@ -61,6 +65,8 @@ chipdoc finish work/<slug> --out out
 | C. 纯手动 | 聊天窗口里的模型 | 否 | `prepare --batch` → 复制 `outbox/*.md` → 存 `response/*.json` → `finish` |
 
 ## 离线运行与扩展
+
+> 完整的构建/迁移/校验步骤见 **[docs/OFFLINE.md](docs/OFFLINE.md)**（含 Windows 与 Linux 差异、故障排查）。
 
 ### 方式一：塞进已有的 venv（推荐，不需要 pip）
 

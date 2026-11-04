@@ -241,6 +241,30 @@ class TestExternalHandoff(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestVenvHelpers(unittest.TestCase):
+    """venv 在 Windows 是 Scripts/，在 POSIX 是 bin/，工具必须都能识别。"""
+
+    def test_layout_detection(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from install_into_venv import _scripts_dir, _venv_python
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            win = tmp / "win"
+            (win / "Scripts").mkdir(parents=True)
+            (win / "Scripts" / "python.exe").write_text("", encoding="utf-8")
+            self.assertEqual(_scripts_dir(win).name, "Scripts")
+            self.assertEqual(_venv_python(win).name, "python.exe")
+
+            posix = tmp / "posix"
+            (posix / "bin").mkdir(parents=True)
+            (posix / "bin" / "python").write_text("", encoding="utf-8")
+            self.assertEqual(_scripts_dir(posix).name, "bin")
+            self.assertEqual(_venv_python(posix).name, "python")
+        finally:
+            sys.path.remove(str(ROOT / "tools"))
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class TestPureBackend(unittest.TestCase):
     """不装 PyMuPDF 也能解析：页数、目录、正文。"""
 

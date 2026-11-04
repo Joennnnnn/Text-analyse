@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import subprocess
@@ -22,7 +23,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
-from install_into_venv import install  # noqa: E402
+from install_into_venv import _scripts_dir, _venv_python, install  # noqa: E402
 
 IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo", "pip", "setuptools", "pkg_resources")
 
@@ -57,22 +58,22 @@ def build(profile: str = "lean", out_dir: str = "dist",
     venv = bundle / "venv"
     if profile == "full":
         src = (ROOT / source_venv).resolve()
-        if not (src / "bin" / "python").exists():
-            raise SystemExit(f"找不到源 venv: {src}（先 pip install -e .）")
+        if not src.exists():
+            raise SystemExit(f"找不到源 venv: {src}（先 python -m venv .venv 并安装）")
         shutil.copytree(src, venv, symlinks=False, ignore=IGNORE)
         for pyc in venv.rglob("__pycache__"):
             shutil.rmtree(pyc, ignore_errors=True)
         site = Path(subprocess.check_output(
-            [str(venv / "bin" / "python"), "-c",
+            [str(_venv_python(venv)), "-c",
              "import sysconfig;print(sysconfig.get_paths()['purelib'])"], text=True).strip())
         _clean_editable(site)
         shutil.rmtree(site / "chipdoc", ignore_errors=True)
     else:
         _run([sys.executable, "-m", "venv", str(venv)])
         if profile == "pdf":
-            _run([str(venv / "bin" / "pip"), "install", "-q", "pymupdf<2"])
+            _run([str(_scripts_dir(venv) / "pip"), "install", "-q", "pymupdf<2"])
         site = Path(subprocess.check_output(
-            [str(venv / "bin" / "python"), "-c",
+            [str(_venv_python(venv)), "-c",
              "import sysconfig;print(sysconfig.get_paths()['purelib'])"], text=True).strip())
 
     install(venv, ROOT)
@@ -87,6 +88,9 @@ def build(profile: str = "lean", out_dir: str = "dist",
         'DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\n'
         'exec "$DIR/venv/bin/python" -m chipdoc "$@"\n', encoding="utf-8")
     (bundle / "run.sh").chmod(0o755)
+    (bundle / "run.cmd").write_text(
+        "@echo off\r\n"
+        "\"%~dp0venv\\Scripts\\python.exe\" -m chipdoc %*\r\n", encoding="utf-8")
 
     (bundle / "README-OFFLINE.txt").write_text(
         "chipdoc 离线包\n"
@@ -112,7 +116,10 @@ def build(profile: str = "lean", out_dir: str = "dist",
     tar = out / "chipdoc-bundle.tar.gz"
     with tarfile.open(tar, "w:gz") as tf:
         tf.add(bundle, arcname="chipdoc-bundle")
+    digest = hashlib.sha256(tar.read_bytes()).hexdigest()
+    (out / "chipdoc-bundle.tar.gz.sha256").write_text(f"{digest}  {tar.name}\n", encoding="utf-8")
     print(f"压缩：{tar}  ({tar.stat().st_size/1e6:.1f} MB)")
+    print(f"校验：{out/'chipdoc-bundle.tar.gz.sha256'}  ({digest[:16]}…)")
     return tar
 
 
