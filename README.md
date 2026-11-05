@@ -164,7 +164,8 @@ run.cmd doctor 手册.pdf
 run.cmd run 手册.pdf --engine rules --out out
 ```
 
-包内自带解释器，`run.cmd` 用绝对路径调用，不读系统 Python、不需要管理员权限。
+包内自带解释器，`run.cmd` 用绝对路径调用，并加 `-E -s` 忽略机器上的 PYTHONHOME/PYTHONPATH，
+所以不会和其他 Python 混用标准库（`SRE module mismatch` 就是混用导致的）。
 详细步骤与排错见 [docs/OFFLINE.md](docs/OFFLINE.md)。
 
 > 之前给的是 `.tar.gz`，Windows 资源管理器默认打不开，这通常就是“拷过去用不了”的原因；现在改成 ZIP。

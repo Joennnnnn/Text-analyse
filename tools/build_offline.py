@@ -94,13 +94,13 @@ def _check_structure(out: Path) -> None:
     checks = {
         "python.exe": runtime / "python.exe",
         "python312.dll": runtime / "python312.dll",
-        "pymupdf/_mupdf.pyd": out / "site-packages" / "pymupdf" / "_mupdf.pyd",
+        "pymupdf/_mupdf.pyd": runtime / "Lib" / "site-packages" / "pymupdf" / "_mupdf.pyd",
         "run.cmd": out / "run.cmd",
     }
     missing = [name for name, p in checks.items() if not p.exists()]
     if missing:
         raise SystemExit("产物结构不完整：" + ", ".join(missing))
-    wheel = next((out / "site-packages").glob("pymupdf-*.dist-info/WHEEL"), None)
+    wheel = next((runtime / "Lib" / "site-packages").glob("pymupdf-*.dist-info/WHEEL"), None)
     if wheel and TARGET_PLATFORM not in wheel.read_text(encoding="utf-8", errors="ignore"):
         raise SystemExit("PyMuPDF wheel 平台不是 " + TARGET_PLATFORM)
 
@@ -125,7 +125,7 @@ def build(out: Path = DIST / "chipdoc-offline", skip_download: bool = False) -> 
         raise SystemExit("运行时结构异常：找不到 python/python.exe")
 
     _trim_runtime(runtime)
-    _install_site(out / "site-packages")
+    _install_site(runtime / "Lib" / "site-packages")
 
     plugins = ROOT / "plugins"
     if plugins.is_dir():
@@ -136,16 +136,17 @@ def build(out: Path = DIST / "chipdoc-offline", skip_download: bool = False) -> 
         "@echo off\r\n"
         "setlocal\r\n"
         "set \"DIR=%~dp0\"\r\n"
-        "set \"PYTHONPATH=%DIR%site-packages\"\r\n"
+        "set \"PYTHONHOME=\"\r\n"
+        "set \"PYTHONPATH=\"\r\n"
         "if exist \"%DIR%plugins\" set \"CHIPDOC_PLUGINS=%DIR%plugins\"\r\n"
         "if \"%~1\"==\"\" (\r\n"
-        "  \"%DIR%runtime\\python\\python.exe\" -P -m chipdoc --help\r\n"
+        "  \"%DIR%runtime\\python\\python.exe\" -E -s -P -m chipdoc --help\r\n"
         "  echo.\r\n"
         "  echo 用法示例：run.cmd doctor 手册.pdf\r\n"
         "  pause\r\n"
         "  exit /b 0\r\n"
         ")\r\n"
-        "\"%DIR%runtime\\python\\python.exe\" -P -m chipdoc %*\r\n"
+        "\"%DIR%runtime\\python\\python.exe\" -E -s -P -m chipdoc %*\r\n"
         "if errorlevel 1 pause\r\n",
         encoding="utf-8")
 
@@ -154,7 +155,9 @@ def build(out: Path = DIST / "chipdoc-offline", skip_download: bool = False) -> 
         "setlocal\r\n"
         "set \"DIR=%~dp0\"\r\n"
         "echo 目录：%DIR%\r\n"
-        "\"%DIR%runtime\\python\\python.exe\" -c \"import sys,pymupdf;print('python',sys.version);print('pymupdf',pymupdf.__version__);print('exe',sys.executable)\"\r\n"
+        "echo PYTHONHOME=%PYTHONHOME%\r\n"
+        "echo PYTHONPATH=%PYTHONPATH%\r\n"
+        "\"%DIR%runtime\\python\\python.exe\" -E -s -c \"import sys,pymupdf;print('python',sys.version);print('pymupdf',pymupdf.__version__);print('exe',sys.executable)\"\r\n"
         "pause\r\n",
         encoding="utf-8")
 
@@ -163,6 +166,8 @@ def build(out: Path = DIST / "chipdoc-offline", skip_download: bool = False) -> 
         "============================================================\r\n\r\n"
         "1. 把整个文件夹放到纯英文路径（如 D:\\tools\\chipdoc-offline）\r\n"
         "2. 双击 run.cmd 可看到用法（不带参数时会停住）\r\n"
+        "   如果报 SRE module mismatch，说明系统里有冲突的 PYTHONHOME/PYTHONPATH；\r\n"
+        "   本包已用 -E -s 隔离，仍报错请运行 diagnose.cmd 并把输出发给开发者。\r\n"
         "3. 在命令提示符里执行：\r\n\r\n"
         "  run.cmd doctor 手册.pdf\r\n"
         "  run.cmd prepare 手册.pdf --work work --batch 4\r\n"

@@ -61,18 +61,22 @@ PyMuPDF     1.28.2
 | SmartScreen / 杀软拦截 | `python.exe` 未签名 | 允许运行，或把目录加入白名单 |
 | `无法启动此程序` / 缺 DLL | 32 位系统或解压不完整 | 本包只支持 **Windows x64**；重新完整解压 |
 | 中文路径下异常 | 路径编码问题 | 移到 `D:\tools\chipdoc-offline` 这类纯英文路径 |
-| `ModuleNotFoundError: pymupdf` | 包不完整 | 重新解压，确认 `site-packages\pymupdf\_mupdf.pyd` 存在 |
+| `ModuleNotFoundError: pymupdf` | 包不完整 | 重新解压，确认 `runtime\python\Lib\site-packages\pymupdf\_mupdf.pyd` 存在 |
+| `AssertionError: SRE module mismatch` | 机器上的 `PYTHONHOME`/`PYTHONPATH` 指向了别的 Python，标准库与解释器版本不一致 | 新包已用 `-E -s` 隔离；请**删掉旧目录重新解压**，不要和旧版本混在一个文件夹 |
 
 ## 包内结构
 
 ```
 chipdoc-offline/
-├── run.cmd              入口
+├── run.cmd              入口（-E -s -P 隔离运行）
 ├── diagnose.cmd         自检
 ├── README-OFFLINE.txt
-├── runtime/python/      CPython 3.12.7（Windows x64）
-└── site-packages/       pymupdf 1.28.2 + chipdoc
+└── runtime/python/      CPython 3.12.7（Windows x64）
+    └── Lib/site-packages/   pymupdf 1.28.2 + chipdoc
 ```
+
+依赖全部装在**包内解释器自己的 site-packages** 里，启动时用 `-E -s` 忽略机器上的 PYTHONHOME/PYTHONPATH，
+所以不会和系统里其他 Python 混用标准库。
 
 ## 自己重新构建（可选，需要联网一次）
 
