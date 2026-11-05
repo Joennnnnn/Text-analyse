@@ -19,9 +19,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pymupdf
 
 from chipdoc.cli import main
-from chipdoc.extract import extract_rules
-from chipdoc.index import build_index
-from chipdoc.reduce import merge_facts
+from chipdoc.rules import extract_rules
+from chipdoc.parsing import build_index
+from chipdoc.merge import merge_facts
 from chipdoc.render import diff_snapshots
 from chipdoc.verify import Fact, check
 
@@ -133,7 +133,7 @@ class TestIndexAndRules(unittest.TestCase):
 
 
 class TestPipeline(unittest.TestCase):
-    """analyze → work/ 产物 → out/ 矩阵与 diff；再跑一次应复用。"""
+    """run → work/ 产物 → out/ 矩阵与 diff；再跑一次应复用。"""
 
     @classmethod
     def setUpClass(cls):
@@ -153,7 +153,7 @@ class TestPipeline(unittest.TestCase):
 
     def _run(self, *extra, config=None):
         work, out = self.tmp / "work", self.tmp / "out"
-        argv = ["analyze", str(self.pdf), "--work", str(work), "--out", str(out),
+        argv = ["run", str(self.pdf), "--work", str(work), "--out", str(out),
                 "--model", "mock", "--base-url", f"http://127.0.0.1:{self.port}/v1"]
         if config:
             argv += ["--config", str(config)]
@@ -241,47 +241,36 @@ class TestExternalHandoff(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
-class TestVenvHelpers(unittest.TestCase):
-    """venv 在 Windows 是 Scripts/，在 POSIX 是 bin/，工具必须都能识别。"""
+class TestOfflineBuild(unittest.TestCase):
+    """离线包构建脚本的关键约束（不在测试里真的下载/打包）。"""
 
-    def test_layout_detection(self):
+    def test_pinned_runtime_and_pymupdf(self):
         sys.path.insert(0, str(ROOT / "tools"))
-        from install_into_venv import _scripts_dir, _venv_python
-        tmp = Path(tempfile.mkdtemp())
         try:
-            win = tmp / "win"
-            (win / "Scripts").mkdir(parents=True)
-            (win / "Scripts" / "python.exe").write_text("", encoding="utf-8")
-            self.assertEqual(_scripts_dir(win).name, "Scripts")
-            self.assertEqual(_venv_python(win).name, "python.exe")
-
-            posix = tmp / "posix"
-            (posix / "bin").mkdir(parents=True)
-            (posix / "bin" / "python").write_text("", encoding="utf-8")
-            self.assertEqual(_scripts_dir(posix).name, "bin")
-            self.assertEqual(_venv_python(posix).name, "python")
+            import build_offline
         finally:
             sys.path.remove(str(ROOT / "tools"))
-            shutil.rmtree(tmp, ignore_errors=True)
+        self.assertIn("cpython-3.12", build_offline.RUNTIME_URL)
+        self.assertIn("windows", build_offline.RUNTIME_URL)
+        self.assertEqual(build_offline.TARGET_PLATFORM, "win_amd64")
+        self.assertRegex(build_offline.PYMUPDF, r"^\d+\.\d+\.\d+$")
+        self.assertTrue(any("test" in p for p in build_offline.TRIM))
 
 
-class TestPureBackend(unittest.TestCase):
-    """不装 PyMuPDF 也能解析：页数、目录、正文。"""
+class TestOfflineBuild(unittest.TestCase):
+    """离线包构建脚本的关键约束（不在测试里真的下载/打包）。"""
 
-    def test_structure(self):
-        from chipdoc.index import build_index
-        idx = build_index(TI_PDF, backend="pure")
-        self.assertEqual(idx.page_count, 159)
-        self.assertGreaterEqual(len(idx.toc), 190)
-        self.assertEqual(idx.toc[0].page, 1)
-        self.assertIn("TMS320F2805x", idx.page_text(1))
-
-    def test_rules_on_pure_backend(self):
-        from chipdoc.index import build_index
-        facts, _ = extract_rules(build_index(TI_PDF, backend="pure"))
-        by = {f.field: f for f in facts}
-        self.assertIn("max_freq", by)
-        self.assertIn("60", by["max_freq"].value)
+    def test_pinned_runtime_and_pymupdf(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        try:
+            import build_offline
+        finally:
+            sys.path.remove(str(ROOT / "tools"))
+        self.assertIn("cpython-3.12", build_offline.RUNTIME_URL)
+        self.assertIn("windows", build_offline.RUNTIME_URL)
+        self.assertEqual(build_offline.TARGET_PLATFORM, "win_amd64")
+        self.assertRegex(build_offline.PYMUPDF, r"^\d+\.\d+\.\d+$")
+        self.assertTrue(any("test" in p for p in build_offline.TRIM))
 
 
 class TestPlugins(unittest.TestCase):
@@ -360,7 +349,7 @@ class TestGenericDocument(unittest.TestCase):
             work = tmp / "work"
             self.assertEqual(main(["index", str(pdf), "--work", str(work), "--kind", "generic"]), 0)
 
-            from chipdoc.stages import Workdoc
+            from chipdoc.pipeline import Workdoc
             wd = Workdoc(work / "an1234")
             self.assertIn("key_params", [f.id for f in wd.fields])
 

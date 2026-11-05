@@ -18,14 +18,13 @@ import time
 from pathlib import Path
 
 from . import __version__
-from .index import build_index
 from .providers import ExternalProvider, ProviderConfig, ProviderError, load_config, make_provider, resolve_config
 from .render import (build_matrix, diff_snapshots, make_snapshot, write_diff, write_doc,
                      write_matrix)
 from .prompts import EXTRACT_SYSTEM, SUMMARY_SYSTEM, extract_prompt, summary_prompt
-from .stages import (Workdoc, _read, pending_chunks, pending_sections, stage_extract,
-                     stage_index, stage_ingest, stage_merge, stage_outbox, stage_summarize,
-                     stage_verify)
+from .pipeline import (Workdoc, _read, pending_chunks, pending_sections, stage_extract,
+                       stage_index, stage_ingest, stage_merge, stage_outbox, stage_summarize,
+                       stage_verify)
 
 
 def _provider_args(p: argparse.ArgumentParser) -> None:
@@ -58,7 +57,7 @@ def _wd(paths: list[str]) -> list[Workdoc]:
 def cmd_index(args) -> int:
     for pdf in args.pdfs:
         wd = stage_index(pdf, args.work, force=args.refresh,
-                         kind=args.kind, fields_path=args.fields, backend=args.backend)
+                         kind=args.kind, fields_path=args.fields)
         print(f"+ {wd.slug}: {wd.index.page_count} 页 / {len(wd.index.chunks)} 块 / "
               f"目录 {len(wd.index.toc)} 条 → {wd.dir}")
 
@@ -108,7 +107,7 @@ def cmd_merge(args) -> int:
 
 
 def cmd_render(args) -> int:
-    from .reduce import Profile
+    from .merge import Profile
     profiles = [Profile(**json.loads(p.read_text(encoding="utf-8")))
                 for p in sorted(Path(args.work).glob("*/profile.json"))]
     if not profiles:
@@ -146,7 +145,7 @@ def cmd_run(args) -> int:
         t0 = time.time()
         wd = stage_index(pdf, args.work, force=args.refresh,
                          kind=getattr(args, "kind", None), fields_path=getattr(args, "fields", None),
-                         backend=getattr(args, "backend", "auto"))
+                         )
         print(f"+ {wd.slug}: {wd.index.page_count} 页 / {len(wd.index.chunks)} 块")
         ex = stage_extract(wd, provider, engine=engine, jobs=args.jobs, force=args.refresh)
         if engine == "rules":
@@ -187,7 +186,7 @@ def _chunk_pending(wd: Workdoc) -> list[tuple[str, list[int]]]:
 
 
 def _summary_pending(wd: Workdoc) -> list[tuple[str, str, int]]:
-    from .index import Section
+    from .parsing import Section
     blocks = wd.index.section_blocks(1, 2)[:20]
     if not blocks:
         blocks = [Section(1, s.sections[0] if s.sections else f"块 {s.cid}", s.pages[0])
@@ -245,7 +244,7 @@ def cmd_prepare(args) -> int:
     external = ExternalProvider(ProviderConfig(kind="external"))
     for pdf in args.pdfs:
         wd = stage_index(pdf, args.work, force=args.refresh,
-                         kind=args.kind, fields_path=args.fields, backend=args.backend)
+                         kind=args.kind, fields_path=args.fields)
         print(f"+ {wd.slug}: {wd.index.page_count} 页 / {len(wd.chunk_files())} 块 / 类型 {wd.index.kind}")
         if args.rules:
             r = stage_extract(wd, external, engine="rules")
@@ -331,7 +330,7 @@ def cmd_show(args) -> int:
         print("--- USER ---")
         print(extract_prompt(wd.fields, chunk["text"]))
     else:
-        from .index import Section
+        from .parsing import Section
         blocks = wd.index.section_blocks(1, 2)[:20]
         if not blocks:
             blocks = [Section(1, s.sections[0] if s.sections else f"块 {s.cid}", s.pages[0])
@@ -378,12 +377,14 @@ def cmd_where(args) -> int:
     print(f"解释器      {sys.executable}")
     print(f"包位置      {Path(__file__).resolve().parent}")
     print(f"当前目录    {Path.cwd()}")
-    print(f"前缀        {sys.prefix}" + ("  (venv)" if sys.prefix != sys.base_prefix else "  (系统 Python)"))
+    prefix_kind = "venv" if sys.prefix != sys.base_prefix else "独立/系统 Python"
+    print(f"前缀        {sys.prefix}  ({prefix_kind})")
     for d in (Path("work"), Path("out"), Path("dist")):
         print(f"  {d.name:<8} {'存在 ' + str(d.resolve()) if d.exists() else '不存在'}")
     mods = plugin_mod.load()
     print(f"插件        {len(mods)} 个" + ("" if not mods else "：" + ", ".join(m.__name__ for m in mods)))
-    print(f"PDF 后端    {'pymupdf' if __import__('chipdoc.backend', fromlist=['_has_pymupdf'])._has_pymupdf() else 'pure-python'}")
+    import pymupdf
+    print(f"PyMuPDF     {pymupdf.__version__}")
     return 0
 
 
@@ -391,10 +392,10 @@ def cmd_doctor(args) -> int:
     """环境与文档体检：哪些能力可用、这份 PDF 能不能直接跑。"""
     import shutil
 
-    from .backend import Doc, _has_pymupdf
+    import pymupdf
 
     print(f"python      {sys.version.split()[0]}")
-    print(f"pymupdf     {'已安装（自动优先使用）' if _has_pymupdf() else '未安装（使用内置纯 Python 解析）'}")
+    print(f"pymupdf     {pymupdf.__version__}")
     print("可选工具：")
     for tool, why in (("tesseract", "OCR 引擎"), ("ocrmypdf", "整本 OCR"),
                       ("pdftotext", "外部文本抽取"), ("gs", "Ghostscript")):
@@ -404,20 +405,26 @@ def cmd_doctor(args) -> int:
         print("\n提示：加一个 PDF 路径可以体检具体文档。")
         return 0
 
-    with Doc(args.pdf, backend=args.backend) as doc:
+    with pymupdf.open(args.pdf) as doc:
         n = doc.page_count
-        texts = [doc.page_text(i) for i in range(n)]
+        texts = [doc[i].get_text("text") for i in range(n)]
         empty = [i + 1 for i, t in enumerate(texts) if len(t.strip()) < 40]
         chars = sum(len(t) for t in texts)
-        toc = doc.toc()
-        meta = doc.metadata()
+        toc = doc.get_toc(simple=True)
+        meta = {k.lower(): v for k, v in (doc.metadata or {}).items()}
     print(f"\n文档：{args.pdf}")
-    print(f"  解析后端      {doc.name}")
     print(f"  页数          {n}")
     print(f"  标题          {meta.get('title') or '(无)'}")
     print(f"  文本层        {n - len(empty)}/{n} 页有文本，共 {chars:,} 字符")
     print(f"  需 OCR 的页   {len(empty)} 页" + (f"，例如 {empty[:10]}" if empty else ""))
     print(f"  书签目录      {len(toc)} 条" + ("" if toc else "（无，将退化为按页切分）"))
+    for level, title, page in toc[:5]:
+        print(f"    {'  ' * (level - 1)}{title}  p.{page}")
+    from .parsing import Section, _clean_page, build_chunks
+    chunks = build_chunks([_clean_page(t) for t in texts],
+                          [Section(max(1, lv), ti, pg) for lv, ti, pg in toc])
+    avg = sum(c.chars for c in chunks) // max(1, len(chunks))
+    print(f"  切块          {len(chunks)} 块，平均 {avg} 字符")
     print(f"  估算 token    ~{int(chars / 2.2):,}（切块后每块约 3.3k 字符）")
     if not empty:
         verdict = "可直接分析"
@@ -426,18 +433,6 @@ def cmd_doctor(args) -> int:
     else:
         verdict = f"部分可分析：{len(empty)} 页无文本层，涉及这些页的结论会缺失"
     print(f"  结论          {verdict}")
-    return 0
-
-
-def cmd_inspect(args) -> int:
-    idx = build_index(args.pdf, kind=args.kind)
-    print(f"{idx.title}\n{idx.page_count} 页 / 类型 {idx.kind} / sha {idx.sha[:12]}")
-    print(f"目录 {len(idx.toc)} 条，前 10 条：")
-    for s in idx.toc[:10]:
-        print(f"  {'  ' * (s.level - 1)}{s.title}  p.{s.page}")
-    empty = [i for i, t in enumerate(idx.pages, 1) if not t.strip()]
-    print(f"无文本层页面：{empty[:20]}{' …' if len(empty) > 20 else ''}（共 {len(empty)} 页）")
-    print(f"切块：{len(idx.chunks)} 块，平均 {sum(c.chars for c in idx.chunks) // max(1, len(idx.chunks))} 字符")
     return 0
 
 
@@ -454,14 +449,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("doctor", help="体检：环境能力 + PDF 是否可分析")
     p.add_argument("pdf", nargs="?", default=None, help="可选：体检指定 PDF")
-    p.add_argument("--backend", choices=["auto", "pure", "pymupdf"], default="auto",
-                   help="强制使用某个解析后端")
     p.set_defaults(func=cmd_doctor)
-
-    p = sub.add_parser("inspect", help="预览页数/目录/切块/无文本层页")
-    p.add_argument("pdf", help="PDF 路径")
-    p.add_argument("--kind", default=None, help="强制指定文档类型")
-    p.set_defaults(func=cmd_inspect)
 
     p = sub.add_parser("index", help="① 建索引与切块（不调用模型）")
     p.add_argument("pdfs", nargs="+", help="一个或多个 PDF")
@@ -469,8 +457,6 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--kind", default=None, help="datasheet / trm / generic（默认自动判断）")
     p.add_argument("--fields", default=None, help="自定义字段集 JSON")
     p.add_argument("--refresh", action="store_true", help="忽略已有索引，重新建立")
-    p.add_argument("--backend", choices=["auto", "pure", "pymupdf"], default="auto",
-                   help="PDF 解析后端：auto 优先 PyMuPDF，没有则用内置纯 Python")
     p.set_defaults(func=cmd_index)
 
     p = sub.add_parser("prepare", help="①+ 本地准备：索引 + 任务包 + 清单（不调用模型）")
@@ -482,8 +468,6 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--refresh", action="store_true", help="忽略缓存，重新建立")
     p.add_argument("--rules", action="store_true", help="同时跑一遍规则引擎基线")
     p.add_argument("--batch", type=int, default=4, help="每个任务包放几个块，默认 4")
-    p.add_argument("--backend", choices=["auto", "pure", "pymupdf"], default="auto",
-                   help="PDF 解析后端")
     p.set_defaults(func=cmd_prepare)
 
     p = sub.add_parser("outbox", help="重新生成可复制粘贴的任务包（不调用模型）")
@@ -538,26 +522,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", default="out", help="输出目录，默认 out")
     p.set_defaults(func=cmd_finish)
 
-    for name in ("run", "analyze"):
-        p = sub.add_parser(name, help="一条龙：index → extract → verify → merge → render")
-        p.add_argument("pdfs", nargs="+", help="一个或多个 PDF")
-        p.add_argument("--work", default="work", help="工作目录根，默认 work")
-        p.add_argument("--out", default="out", help="输出目录，默认 out")
-        p.add_argument("--engine", choices=["llm", "rules", "both"], default="llm",
-                       help="llm=调模型；rules=规则引擎；both=两者合并")
-        p.add_argument("--jobs", type=int, default=6, help="并发数，默认 6")
-        p.add_argument("--refresh", action="store_true", help="忽略缓存，全部重跑")
-        p.add_argument("--kind", default=None, help="datasheet / trm / generic")
-        p.add_argument("--fields", default=None, help="自定义字段集 JSON")
-        p.add_argument("--backend", choices=["auto", "pure", "pymupdf"], default="auto",
-                       help="PDF 解析后端")
-        _provider_args(p)
-        p.set_defaults(func=cmd_run)
-
-    p = sub.add_parser("compare", help="只重建矩阵与 diff（不调用模型）")
+    p = sub.add_parser("run", help="一条龙：index → extract → verify → merge → render")
+    p.add_argument("pdfs", nargs="+", help="一个或多个 PDF")
     p.add_argument("--work", default="work", help="工作目录根，默认 work")
     p.add_argument("--out", default="out", help="输出目录，默认 out")
-    p.set_defaults(func=cmd_render)
+    p.add_argument("--engine", choices=["llm", "rules", "both"], default="llm",
+                   help="llm=调模型；rules=规则引擎；both=两者合并")
+    p.add_argument("--jobs", type=int, default=6, help="并发数，默认 6")
+    p.add_argument("--refresh", action="store_true", help="忽略缓存，全部重跑")
+    p.add_argument("--kind", default=None, help="datasheet / trm / generic")
+    p.add_argument("--fields", default=None, help="自定义字段集 JSON")
+    _provider_args(p)
+    p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("status", help="查看各阶段进度（不调用模型）")
     p.add_argument("workdirs", nargs="+", help="工作目录")

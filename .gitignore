@@ -7,3 +7,5 @@ work/
 dist/
 .tmp-*/
 dist-full/
+.cache/
+*.egg-info/

@@ -6,7 +6,7 @@ import datetime as dt
 import json
 from pathlib import Path
 
-from .reduce import Profile
+from .merge import Profile
 from .schema import equivalent, fields_for
 
 

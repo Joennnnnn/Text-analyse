@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 
-from .index import DocIndex
+from .parsing import DocIndex
 from .verify import Fact, verify_facts
 
 

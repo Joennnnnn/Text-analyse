@@ -17,16 +17,16 @@ description: 分析芯片/电子类技术文档（datasheet、TRM、应用笔记
 
 ## 前置
 
-有网：`python3 -m venv .venv && .venv/bin/pip install -e .`（可选装 `.[fast]` 启用 PyMuPDF）
+开发机（Windows）：`py -3 -m venv .venv && .venv\Scripts\pip install -e .`
 
-离线、没有 pip：
+离线部署：
 
-```bash
-python3 tools/build_pyz.py          # 生成 dist/chipdoc.pyz
-python3 dist/chipdoc.pyz doctor 文档.pdf
+```bat
+py -3 tools\build_offline.py       :: 构建机联网一次
+:: 目标机：解压 chipdoc-offline.tar.gz，run.cmd doctor 文档.pdf
 ```
 
-单文件即可运行，不依赖任何第三方包；装了 PyMuPDF 会自动优先使用，没有则用内置纯 Python 解析。
+包内自带 Windows 版 Python 运行时和 PyMuPDF，目标机不需要装任何东西。
 
 文档类型三选一（默认自动判断）：
 

@@ -20,12 +20,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .extract import extract_rules
-from .index import DocIndex, Section, build_chunks, build_index
+from .rules import extract_rules
+from .parsing import DocIndex, Section, build_chunks, build_index
 from .prompts import (EXTRACT_SYSTEM, PROMPT_VERSION, SUMMARY_SYSTEM, batch_extract_markdown,
                       batch_summary_markdown, extract_prompt, summary_prompt)
 from .providers import Provider, ProviderError
-from .reduce import Profile, _grounded, merge_facts
+from .merge import Profile, _grounded, merge_facts
 from .schema import fields_for, load_fields
 from .util import ParseError, parse_json, run_parallel
 from .verify import Fact, verify_facts
@@ -95,17 +95,16 @@ class Workdoc:
 
 
 def stage_index(pdf: str | Path, work_root: str | Path, force: bool = False,
-                kind: str | None = None, fields_path: str | None = None,
-                backend: str = "auto") -> Workdoc:
+                kind: str | None = None, fields_path: str | None = None) -> Workdoc:
     pdf = Path(pdf).resolve()
     root = Path(work_root).resolve()
     slug = slugify(pdf)
     wd = root / slug
     if (wd / "doc.json").exists() and not force:
         wd_obj = Workdoc(wd)
-        if wd_obj.doc["sha"] == build_index(pdf, kind=None, backend=backend).sha:
+        if wd_obj.doc["sha"] == build_index(pdf, kind=None).sha:
             return wd_obj
-    idx = build_index(pdf, kind=kind, backend=backend)
+    idx = build_index(pdf, kind=kind)
     _write(root / slug / "doc.json", {
         "path": str(pdf), "sha": idx.sha, "title": idx.title, "kind": idx.kind,
         "pages": idx.page_count, "meta": idx.meta, "prompt_version": PROMPT_VERSION,
@@ -444,7 +443,7 @@ def stage_merge(wd: Workdoc, model_label: str = "") -> Profile:
 
 
 def _extractive_sections(wd: Workdoc) -> list[dict]:
-    from .reduce import _extractive
+    from .merge import _extractive
     blocks = wd.index.section_blocks(1, 2)[:14]
     if not blocks:
         blocks = [Section(1, s.sections[0] if s.sections else f"块 {s.cid}", s.pages[0])

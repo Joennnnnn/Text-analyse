@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from .index import DocIndex, Section
+from .parsing import DocIndex, Section
 from .schema import MULTI_VALUE_FIELDS, fields_for
 from .verify import Fact, norm
 

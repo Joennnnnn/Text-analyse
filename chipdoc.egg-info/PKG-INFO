@@ -1,6 +1,0 @@
-Metadata-Version: 2.4
-Name: chipdoc
-Version: 0.2.0
-Summary: 芯片/电子类 PDF 分析流水线：页码溯源、横向对比、增量 diff
-Requires-Python: >=3.11
-Requires-Dist: pymupdf>=2.0
