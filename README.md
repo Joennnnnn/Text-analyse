@@ -31,15 +31,21 @@ examples/plugin_example.py
 samples/                 示例 PDF
 ```
 
-## 安装（Windows）
+## 最快用法（只需要 Python 3.11+ 和 pymupdf）
+
+在仓库根目录执行：
 
 ```bat
-py -3 -m venv .venv
-.venv\Scripts\pip install -e .
-.venv\Scripts\chipdoc --version
+py -3 -m pip install pymupdf
+py -3 -m chipdoc doctor 手册.pdf
+py -3 -m chipdoc run 手册.pdf --engine rules --out out
 ```
 
-日常也可以直接用仓库根目录的 `chipdoc.cmd`（自动找 `.venv\Scripts\python.exe`，找不到用 `py -3`）。
+不需要安装 chipdoc 本身——从仓库根目录运行 `python -m chipdoc` 就会加载当前目录的包。
+想在别的目录调用，再执行 `py -3 -m pip install -e .`。
+
+也可以双击/运行仓库根目录的 `chipdoc.cmd`：它会自动挑解释器（`.venv` → `py -3` → `python`），
+缺 pymupdf 时自动装一次。
 
 ## 三种工作方式
 
@@ -137,42 +143,31 @@ out/
 
 不花 token，但能挡住“页码幻觉”。每次运行都会打印丢弃数量。
 
-## 离线部署（Windows）
+## 拷贝即用（不需要 Python / 不需要 pip）
 
-仓库里已经放了构建好的成品，**不需要联网、不需要构建**：
+目标机装不了 pymupdf 时，用仓库里打好的 ZIP：
 
 ```
-portable/chipdoc-offline.tar.gz     28 MB（内含 CPython 3.12 + PyMuPDF + chipdoc）
-chipdoc.cmd                        仓库根目录，一键解压并运行（有 .venv 时自动走开发模式）
+dist/chipdoc-offline.zip        29 MB（内含 CPython 3.12 + PyMuPDF + chipdoc）
+dist/chipdoc-offline.zip.sha256
 ```
 
-目标机操作：
+三步：
+
+1. 把 ZIP 复制到目标机，**右键 → 全部解压缩**（Windows 10/11 自带，不需要 7-Zip）
+2. 进入 `chipdoc-offline\`，双击 `run.cmd`（不带参数会显示帮助并停住，确认能启动）
+3. 在命令提示符里执行：
 
 ```bat
-:: 把整个仓库目录拷过去，然后
-chipdoc.cmd where
-chipdoc.cmd doctor 手册.pdf
-chipdoc.cmd prepare 手册.pdf --work work --batch 4
+run.cmd where
+run.cmd doctor 手册.pdf
+run.cmd run 手册.pdf --engine rules --out out
 ```
 
-第一次运行会自动把 `portable\chipdoc-offline.tar.gz` 解压到 `portable\chipdoc-offline\`，
-之后直接复用。开发机上如果存在 `.venv`，`chipdoc.cmd` 会优先用它。解压需要 Windows 10 1803+ 自带的 `tar`，更老的系统用 7-Zip 手动解压后运行
-`portable\chipdoc-offline\run.cmd`（包内自带的入口）。
+包内自带解释器，`run.cmd` 用绝对路径调用，不读系统 Python、不需要管理员权限。
+详细步骤与排错见 [docs/OFFLINE.md](docs/OFFLINE.md)。
 
-也可以自己重新构建（联网一次）：
-
-```bat
-py -3 tools\build_offline.py
-```
-
-完整步骤见 [docs/OFFLINE.md](docs/OFFLINE.md)。
-
-## 把成品放进仓库的代价
-
-- `portable/chipdoc-offline.tar.gz` 是 28 MB 二进制，克隆仓库会多这一份
-- 每次重新构建都会产生一个新的 28 MB 版本，git 历史会线性增长（建议 git-lfs 或放内部制品库）
-- 包内的 PyMuPDF 是 **AGPL-3.0 / 商业双许可**；内部使用没问题，对外分发前请确认许可
-- 只支持 **Windows x64**，32 位 / ARM 跑不了
+> 之前给的是 `.tar.gz`，Windows 资源管理器默认打不开，这通常就是“拷过去用不了”的原因；现在改成 ZIP。
 
 ## 插件
 

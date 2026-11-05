@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tarfile
 import urllib.request
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -137,12 +138,32 @@ def build(out: Path = DIST / "chipdoc-offline", skip_download: bool = False) -> 
         "set \"DIR=%~dp0\"\r\n"
         "set \"PYTHONPATH=%DIR%site-packages\"\r\n"
         "if exist \"%DIR%plugins\" set \"CHIPDOC_PLUGINS=%DIR%plugins\"\r\n"
-        "\"%DIR%runtime\\python\\python.exe\" -P -m chipdoc %*\r\n",
+        "if \"%~1\"==\"\" (\r\n"
+        "  \"%DIR%runtime\\python\\python.exe\" -P -m chipdoc --help\r\n"
+        "  echo.\r\n"
+        "  echo 用法示例：run.cmd doctor 手册.pdf\r\n"
+        "  pause\r\n"
+        "  exit /b 0\r\n"
+        ")\r\n"
+        "\"%DIR%runtime\\python\\python.exe\" -P -m chipdoc %*\r\n"
+        "if errorlevel 1 pause\r\n",
+        encoding="utf-8")
+
+    (out / "diagnose.cmd").write_text(
+        "@echo off\r\n"
+        "setlocal\r\n"
+        "set \"DIR=%~dp0\"\r\n"
+        "echo 目录：%DIR%\r\n"
+        "\"%DIR%runtime\\python\\python.exe\" -c \"import sys,pymupdf;print('python',sys.version);print('pymupdf',pymupdf.__version__);print('exe',sys.executable)\"\r\n"
+        "pause\r\n",
         encoding="utf-8")
 
     (out / "README-OFFLINE.txt").write_text(
         "chipdoc 离线包（Windows x64，自带 Python 运行时，无需安装任何依赖）\r\n"
         "============================================================\r\n\r\n"
+        "1. 把整个文件夹放到纯英文路径（如 D:\\tools\\chipdoc-offline）\r\n"
+        "2. 双击 run.cmd 可看到用法（不带参数时会停住）\r\n"
+        "3. 在命令提示符里执行：\r\n\r\n"
         "  run.cmd doctor 手册.pdf\r\n"
         "  run.cmd prepare 手册.pdf --work work --batch 4\r\n"
         "  run.cmd finish work\\<slug> --out out\r\n\r\n"
@@ -156,12 +177,15 @@ def build(out: Path = DIST / "chipdoc-offline", skip_download: bool = False) -> 
     size = sum(p.lstat().st_size for p in out.rglob("*") if p.is_file() and not p.is_symlink())
     _log(f"目录 {out}  ({size / 1e6:.0f} MB)")
 
-    tar = out.with_suffix(".tar.gz")
-    with tarfile.open(tar, "w:gz") as tf:
-        tf.add(out, arcname=out.name)
-    digest = hashlib.sha256(tar.read_bytes()).hexdigest()
-    (tar.parent / f"{tar.name}.sha256").write_text(f"{digest}  {tar.name}\n", encoding="utf-8")
-    _log(f"压缩 {tar}  ({tar.stat().st_size / 1e6:.0f} MB)  sha256={digest[:16]}…")
+    zip_path = out.with_suffix(".zip")
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        for p in out.rglob("*"):
+            if p.is_file():
+                zf.write(p, p.relative_to(out.parent))
+    digest = hashlib.sha256(zip_path.read_bytes()).hexdigest()
+    (zip_path.parent / f"{zip_path.name}.sha256").write_text(f"{digest}  {zip_path.name}\n",
+                                                              encoding="utf-8")
+    _log(f"压缩 {zip_path}  ({zip_path.stat().st_size / 1e6:.0f} MB)  sha256={digest[:16]}…")
     return out
 
 

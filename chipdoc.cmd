@@ -1,26 +1,31 @@
 @echo off
 setlocal
 set "DIR=%~dp0"
-set "APP=%DIR%portable\chipdoc-offline"
+pushd "%DIR%"
 
-:: 1) 开发机：有 .venv 就直接用
-if exist "%DIR%.venv\Scripts\python.exe" goto dev
+:: 选解释器：优先 .venv，其次 py -3，最后 python
+if exist "%DIR%.venv\Scripts\python.exe" goto use_venv
+where py >nul 2>nul
+if errorlevel 1 goto use_python
+set "PY=py -3"
+goto check
+:use_python
+set "PY=python"
+goto check
+:use_venv
+set "PY=%DIR%.venv\Scripts\python.exe"
 
-:: 2) 离线机：用仓库里自带的成品，首次自动解压
-if exist "%APP%\runtime\python\python.exe" goto payload
-echo [chipdoc] 首次运行，解压离线包...
-tar -xzf "%DIR%portable\chipdoc-offline.tar.gz" -C "%DIR%portable"
-if errorlevel 1 goto tarfail
+:check
+:: 缺 pymupdf 就直接装（需要联网，只装一次）
+%PY% -c "import pymupdf" >nul 2>&1
+if errorlevel 1 (
+  echo [chipdoc] 未检测到 pymupdf，正在安装...
+  %PY% -m pip install pymupdf
+  if errorlevel 1 (
+    echo [chipdoc] 安装失败，请手动执行：%PY% -m pip install pymupdf
+    exit /b 1
+  )
+)
 
-:payload
-call "%APP%\run.cmd" %*
+%PY% -m chipdoc %*
 exit /b %ERRORLEVEL%
-
-:dev
-"%DIR%.venv\Scripts\python.exe" -m chipdoc %*
-exit /b %ERRORLEVEL%
-
-:tarfail
-echo [chipdoc] 解压失败：请用 7-Zip 手动解压 portable\chipdoc-offline.tar.gz
-echo            然后运行 portable\chipdoc-offline\run.cmd
-exit /b 1

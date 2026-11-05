@@ -1,124 +1,86 @@
-# Windows 离线部署
+# Windows 拷贝即用（不需要 Python、pip、联网）
 
-> 仓库里已经带了一个构建好的成品：`portable/chipdoc-offline.tar.gz`（28 MB）。
-> 不想构建的话，直接跳到「2. 传到 Windows 并校验」，或者用仓库根目录的 `chipdoc.cmd` 一键解压运行。
-
-只有一个方案：**构建一个自带 Python 运行时和 PyMuPDF 的目录包**（Windows x64）。
-目标机不需要装 Python、pip 或任何依赖：
-
-- 仓库根目录的 `chipdoc.cmd`：首次自动解压，之后直接运行
-- 或手动解压后运行 `chipdoc-offline\run.cmd`
+目标机装不了 pymupdf 时，用仓库里已经打好的 ZIP。
 
 ```
-dist/chipdoc-offline/            80 MB
-├── runtime/python/              独立 CPython 3.12（Windows x64，可搬迁）
-├── site-packages/               pymupdf 1.28.2 + chipdoc
-├── plugins/                     插件（可选）
-├── run.cmd                      run.cmd doctor 手册.pdf
-└── README-OFFLINE.txt
-
-dist/chipdoc-offline.tar.gz      29 MB
-dist/chipdoc-offline.tar.gz.sha256
+dist/chipdoc-offline.zip        29 MB
+dist/chipdoc-offline.zip.sha256
 ```
 
-## 1. 构建（联网一次）
+## 三步
 
-在任意能联网、且有 Python 3.11+ 的机器上（Windows 或 Linux 都行，这里是交叉构建）：
+### 1. 复制并解压
+
+把 `chipdoc-offline.zip` 拷到目标机（U 盘、共享盘都行），**右键 → 全部解压缩**。
+
+Windows 10/11 资源管理器原生支持 ZIP，不需要 7-Zip、不需要 `tar` 命令。
+
+> 建议解压到纯英文路径，例如 `D:\tools\chipdoc-offline`。
+> 不要直接在 ZIP 里双击运行，必须先完整解压。
+
+### 2. 双击 run.cmd 自检
+
+双击 `chipdoc-offline\run.cmd`。不带参数时它会显示帮助并停住：
+
+```
+usage: chipdoc [-h] [-V] 命令 ...
+...
+用法示例：run.cmd doctor 手册.pdf
+请按任意键继续. . .
+```
+
+看到这个就说明解释器和 PyMuPDF 都正常。
+
+### 3. 命令行运行
+
+打开 cmd，`cd` 到解压目录：
 
 ```bat
-py -3 tools\build_offline.py
-```
-
-脚本做的四件事：
-
-1. 下载 python-build-standalone 的 **CPython 3.12.7（Windows x64）**（约 38 MB，缓存在 `.cache\`）
-2. 用 pip 交叉下载 **PyMuPDF 1.28.2 的 win_amd64 wheel** 并解包到 `site-packages`
-3. 复制 `chipdoc\` 与 `plugins\`（如果有）
-4. 裁掉测试套件、tkinter、pip、调试符号（.pdb），打 tar.gz 并生成 sha256
-
-构建时需要的网络：**仅此一次**。之后重建可加 `--skip-download` 复用缓存。
-
-## 2. 传到 Windows 并校验
-
-```powershell
-Get-FileHash .\chipdoc-offline.tar.gz -Algorithm SHA256
-Get-Content .\chipdoc-offline.tar.gz.sha256
-```
-
-两个值一致即可（也可以用 `certutil -hashfile chipdoc-offline.tar.gz SHA256`）。
-
-## 3. 解压
-
-Windows 10 1803 及以上自带 tar：
-
-```bat
-tar -xzf chipdoc-offline.tar.gz
-cd chipdoc-offline
-```
-
-## 4. 运行
-
-```bat
-run.cmd where                 :: 应显示：PDF 后端 pymupdf
-run.cmd doctor 手册.pdf        :: 页数 / 文本层 / 需 OCR 页
+run.cmd where
+run.cmd doctor 手册.pdf
 run.cmd prepare 手册.pdf --work work --batch 4
 run.cmd finish work\<slug> --out out
 run.cmd run 手册.pdf --engine rules
 ```
 
-`run.cmd` 里写死了包内解释器，并用 `-P` 禁止把当前目录当作模块路径：
-
-```bat
-set "PYTHONPATH=%DIR%site-packages"
-"%DIR%runtime\python\python.exe" -P -m chipdoc %*
-```
-
-所以**既不会用到系统 Python，也不会误加载别的 chipdoc 版本**。
-
-## 5. 验证清单
-
-```bat
-run.cmd --version          :: chipdoc 0.3.0
-run.cmd where              :: 解释器在包内，后端 pymupdf
-run.cmd doctor 手册.pdf     :: 能读出页数/文本层
-run.cmd run 手册.pdf --engine rules --work work --out out
-dir out\matrix.md out\docs
-```
-
-`where` 正常输出示例：
+`run.cmd where` 应显示：
 
 ```
 解释器      ...\chipdoc-offline\runtime\python\python.exe
-包位置      ...\chipdoc-offline\site-packages\chipdoc
-PDF 后端    pymupdf
+PyMuPDF     1.28.2
 ```
 
-## 6. 故障排查
+## 出问题时
+
+**先运行 `diagnose.cmd`**（同目录下），它会打印 Python 版本、PyMuPDF 版本、解释器路径，并停住窗口。
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| `run.cmd` 一闪而过 | 路径含空格/中文，或参数没加引号 | 把包放到纯英文路径（如 `D:\tools\chipdoc-offline`） |
-| `拒绝访问` / 被杀软拦截 | 安全软件拦截未签名 exe | 加白名单，或改用「开发机 venv」方式 |
-| `无法加载 python312.dll` | 解压不完整 | 重新解压，确认 `runtime\python\python312.dll` 存在 |
-| `ModuleNotFoundError: pymupdf` | pymupdf 没进包 | 重新构建，确认日志里有 `下载并解包 PyMuPDF` |
-| 中文乱码 | 终端代码页不是 UTF-8 | `chcp 65001` 后再运行 |
-| `sha256` 不一致 | 传输损坏 | 重新传，别用文本方式拷二进制 |
+| 双击 run.cmd 一闪而过 | 出错但窗口关了 | 运行 `diagnose.cmd`，或在 cmd 里执行 run.cmd 看报错 |
+| 解压后找不到 run.cmd | 只解压了内层目录 | 确认路径是 `...\chipdoc-offline\run.cmd` |
+| SmartScreen / 杀软拦截 | `python.exe` 未签名 | 允许运行，或把目录加入白名单 |
+| `无法启动此程序` / 缺 DLL | 32 位系统或解压不完整 | 本包只支持 **Windows x64**；重新完整解压 |
+| 中文路径下异常 | 路径编码问题 | 移到 `D:\tools\chipdoc-offline` 这类纯英文路径 |
+| `ModuleNotFoundError: pymupdf` | 包不完整 | 重新解压，确认 `site-packages\pymupdf\_mupdf.pyd` 存在 |
 
-## 7. 开发机怎么用（不是部署）
+## 包内结构
 
-Windows 上日常开发：
-
-```bat
-py -3 -m venv .venv
-.venv\Scripts\pip install -e .
-.venv\Scripts\chipdoc doctor 手册.pdf
+```
+chipdoc-offline/
+├── run.cmd              入口
+├── diagnose.cmd         自检
+├── README-OFFLINE.txt
+├── runtime/python/      CPython 3.12.7（Windows x64）
+└── site-packages/       pymupdf 1.28.2 + chipdoc
 ```
 
-或直接双击仓库根目录的 `chipdoc.cmd`（自动找 `.venv\Scripts\python.exe`，找不到就用 `py -3`）。
+## 自己重新构建（可选，需要联网一次）
 
-这和离线包是两件事：`.venv` 依赖本机 Python，**不可搬迁**；离线包自带解释器，**可搬迁**。
+只在需要更新版本时用：
 
-## 8. 关于 Linux
+```bat
+py -3 tools\build_offline.py
+```
 
-已移除 Linux 部署方案（`chipdoc.sh`、linux 运行时、从 venv 复制等）。
-构建脚本本身能在 Linux 上跑（用于交叉构建 Windows 包），但产物是 Windows x64。
+脚本会下载 Windows 运行时和 PyMuPDF wheel，重新生成 `dist\chipdoc-offline.zip`。
+构建机可以是 Windows，也可以是 Linux（交叉构建）。

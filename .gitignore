@@ -3,9 +3,11 @@ __pycache__/
 *.pyc
 out/
 work/
-.demo-ext/
-dist/
-.tmp-*/
-dist-full/
 .cache/
 *.egg-info/
+.tmp-*/
+
+# 构建产物默认忽略，只保留可直接分发的 zip
+dist/*
+!dist/chipdoc-offline.zip
+!dist/chipdoc-offline.zip.sha256
